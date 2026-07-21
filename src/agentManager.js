@@ -67,6 +67,15 @@ function escapeCmdArgument(arg) {
 	return arg.replace(/([()\][%!^"`<>&|;, *?])/g, '^$1');
 }
 
+/**
+ * Human label for a tool's timeline row. "lite" is an internal product suffix,
+ * not something to show a user: render_wireframelite reads as "Drawing wireframe".
+ */
+function toolStepLabel(toolName) {
+	return String(toolName || 'tool').replace(/^mcp__mockflow__/, '')
+		.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
+}
+
 /** Stop an agent process. On Windows the process is a cmd.exe wrapper, so a
  *  plain kill would orphan the real agent - use taskkill on the whole tree. */
 function killProcTree(proc) {
@@ -267,10 +276,7 @@ class AgentManager {
 			if (openSteps[id]) return;
 			var stepId = 'la_' + turnId + '_' + (stepCounter++);
 			openSteps[id] = { stepId: stepId, started: Date.now() };
-			// "lite" is an internal product suffix, not something to show a user:
-			// render_wireframelite reads as "Drawing wireframe".
-			var label = String(toolName || 'tool').replace(/^mcp__mockflow__/, '')
-				.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
+			var label = toolStepLabel(toolName);
 			sendToTab({
 				t: 'chat-step', id: turnId,
 				step: { stepId: stepId, phase: 'start', tool: toolName, label: label, detail: '' }
@@ -596,19 +602,28 @@ class AgentManager {
 	 * by the plan's self-contained briefs (no conversation context needed).
 	 * Draws flow through the normal MCP loopback, get counted by the armed
 	 * plan, and the board arranges itself after the last item.
+	 *
+	 * `sendToTab` streams the generation timeline back so Mida shows the same
+	 * loader the server multiboard turn shows: one step row per item while it is
+	 * being generated (plan-step) plus the "Generated X of Y items…" counter the
+	 * hub pushes as each draw lands (plan-progress). Without it the chat would sit
+	 * silent for the whole batch - the reason the local loader looked worse.
 	 */
-	handlePlanGenerate(tab, plan, hub) {
+	handlePlanGenerate(tab, plan, hub, sendToTab) {
 		const self = this;
 		const key = tab.projectid || tab.id;
 		const items = (plan && plan.items) || [];
+		const send = sendToTab || function() {};
 		if (!items.length) return;
 		if (!this.detect()) {
-			this.log('Plan generate skipped: Claude Code is not installed.');
+			this.log('[plan] generate skipped: Claude Code is not installed.');
 			hub.clearPlan(tab.projectid);
+			send({ t: 'plan-done', ok: false, error: 'Claude Code is not installed on this machine, so the plan could not be generated locally.' });
 			return;
 		}
 		if (this.planProcs.has(key)) {
-			this.log('Plan generate already running for "' + (tab.title || key) + '" - ignored.');
+			this.log('[plan] generate already running for "' + (tab.title || key) + '" - ignored.');
+			send({ t: 'plan-done', ok: false, error: 'A board plan is already generating on this board.' });
 			return;
 		}
 
@@ -637,45 +652,140 @@ class AgentManager {
 			'-p', prompt,
 			'--output-format', 'stream-json',
 			'--verbose',
+			// Announces each render tool the moment the model starts writing it, so the
+			// step row appears immediately instead of after thousands of characters of
+			// HTML have streamed out (same reason the chat turn uses it).
+			'--include-partial-messages',
 			'--mcp-config', this._mcpConfigPath(),
 			'--allowedTools', allowed,
 			'--append-system-prompt', systemPrompt
 		];
 
-		this.log('Plan generate: ' + items.length + ' items for "' + (tab.title || key) + '"');
+		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
+			+ items.map(function(it) { return it.tool; }).join(', ') + ']');
 
 		var proc;
 		try {
 			const spec = claudeSpawnSpec(args);
 			proc = spawn(spec.file, spec.args, Object.assign({ env: process.env, cwd: this.workspace }, spec.opts));
 		} catch (err) {
-			this.log('Plan generate launch failed: ' + err.message);
+			this.log('[plan] generate launch failed: ' + err.message);
 			hub.clearPlan(tab.projectid);
 			hub.selectedProjectId = prevSelected;
+			send({ t: 'plan-done', ok: false, error: 'Could not launch the local agent: ' + err.message });
 			return;
 		}
 		this.planProcs.set(key, proc);
 
-		// Drain stdout (stream-json) so the pipe never blocks the child.
-		proc.stdout.on('data', function() {});
+		// Timeline rows for the generation turn. Same step contract as the chat turn
+		// (renderTimelineStep in the tab), so the local batch renders with the same
+		// spinner/check rows the server multiboard turn renders.
+		var openSteps = {};
+		var stepCounter = 0;
+		var itemCursor = 0;
+		var buf = '';
+
+		function startStep(toolId, toolName) {
+			var id = toolId || ('pl_' + key + '_' + stepCounter);
+			if (openSteps[id]) return;
+			var stepId = 'pl_' + key + '_' + (stepCounter++);
+			// Tools fire in plan order, so the nth call names the nth item - that is
+			// what puts the item name on the row, like the server's "Creating <name>".
+			var item = items[itemCursor++] || null;
+			openSteps[id] = { stepId: stepId, started: Date.now(), name: item && item.name };
+			self.log('[plan] step start: ' + toolName + (item && item.name ? ' -> "' + item.name + '"' : ''));
+			send({
+				t: 'plan-step',
+				step: {
+					stepId: stepId, phase: 'start', tool: toolName,
+					label: toolStepLabel(toolName),
+					detail: String((item && item.name) || '').substring(0, 60)
+				}
+			});
+		}
+
+		function handleLine(line) {
+			var evt;
+			try { evt = JSON.parse(line); } catch (e) { return; }
+
+			if (evt.type === 'stream_event') {
+				var sev = evt.event || {};
+				if (sev.type === 'content_block_start' && sev.content_block
+					&& sev.content_block.type === 'tool_use') {
+					startStep(sev.content_block.id, sev.content_block.name);
+				}
+				return;
+			}
+
+			if (evt.type === 'assistant') {
+				var content = (evt.message && evt.message.content) || [];
+				for (var i = 0; i < content.length; i++) {
+					if (content[i].type === 'tool_use') startStep(content[i].id, content[i].name);
+				}
+			} else if (evt.type === 'user') {
+				var ucontent = (evt.message && evt.message.content) || [];
+				for (var j = 0; j < ucontent.length; j++) {
+					var ublock = ucontent[j];
+					if (ublock.type !== 'tool_result') continue;
+					var open = openSteps[ublock.tool_use_id];
+					if (!open) continue;
+					delete openSteps[ublock.tool_use_id];
+					self.log('[plan] step end: "' + (open.name || open.stepId) + '" '
+						+ (ublock.is_error ? 'FAILED' : 'ok') + ' in ' + (Date.now() - open.started) + 'ms');
+					send({
+						t: 'plan-step',
+						step: { stepId: open.stepId, phase: 'end', ok: !ublock.is_error, elapsedMs: Date.now() - open.started }
+					});
+				}
+			}
+		}
+
+		proc.stdout.on('data', function(chunk) {
+			buf += chunk.toString();
+			var nl;
+			while ((nl = buf.indexOf('\n')) >= 0) {
+				var line = buf.slice(0, nl).trim();
+				buf = buf.slice(nl + 1);
+				if (line) handleLine(line);
+			}
+		});
 		var stderrTail = '';
 		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
 
 		// Backstop: a hung continuation never pins the board's plan forever.
-		const killer = setTimeout(function() { killProcTree(proc); }, config.PLAN_TIMEOUT_MS);
+		const killer = setTimeout(function() {
+			self.log('[plan] generate timed out after ' + config.PLAN_TIMEOUT_MS + 'ms - killing the agent');
+			killProcTree(proc);
+		}, config.PLAN_TIMEOUT_MS);
 
-		const done = function(what) {
+		const done = function(what, ok, error) {
 			clearTimeout(killer);
 			self.planProcs.delete(key);
 			hub.selectedProjectId = prevSelected;
 			// Leftover plan count means the agent died mid-batch - drop it so the
 			// stale plan never re-arranges a later, unrelated batch.
 			hub.clearPlan(tab.projectid);
-			self.log('Plan generate ' + what + ' for "' + (tab.title || key) + '"'
-				+ (what !== 'finished' && stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 200) + ')' : ''));
+			// Close any dangling rows so the tab's timeline never spins forever.
+			for (var k in openSteps) {
+				send({ t: 'plan-step', step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
+			}
+			self.log('[plan] generate ' + what + ' for "' + (tab.title || key) + '": '
+				+ stepCounter + ' of ' + items.length + ' item(s) started'
+				+ (!ok && stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 200) + ')' : ''));
+			send({ t: 'plan-done', ok: ok, error: error || null });
 		};
-		proc.on('error', function() { done('failed to run'); });
-		proc.on('close', function(code) { done(code === 0 ? 'finished' : 'exited ' + code); });
+		proc.on('error', function(err) { done('failed to run', false, 'Local agent error: ' + (err && err.message)); });
+		proc.on('close', function(code) {
+			if (code === 0) done('finished', true, null);
+			else done('exited ' + code, false, 'The local agent stopped before finishing the board'
+				+ (stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 160) + ')' : '') + '.');
+		});
+	}
+
+	cancelPlanGenerate(tab) {
+		const key = tab.projectid || tab.id;
+		const proc = this.planProcs.get(key);
+		if (proc) killProcTree(proc);
 	}
 
 	cancelCompGen(tab) {

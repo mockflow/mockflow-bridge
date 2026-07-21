@@ -12,6 +12,7 @@
  *                   {t:'register', projectid, title, focused, visible, url}
  *                   {t:'state', focused, visible, projectid, title}
  *                   {t:'result', id, ok, data?, error?}
+ *                   {t:'plan-cancel'}           stop the running plan generation
  *   bridge -> tab:  {t:'pair-required'}
  *                   {t:'paired', token}
  *                   {t:'ready'}                 authenticated, please register
@@ -22,6 +23,10 @@
  *                   {t:'layout', id, boardTitle}
  *                   {t:'snapshot', id}              reset the layout batch boundary
  *                   {t:'plan-pick', id, boardTitle, items}   user selects plan items
+ *                   {t:'plan-start', boardTitle, total, items}  generation began
+ *                   {t:'plan-step', step}       timeline row (same shape as ai-step)
+ *                   {t:'plan-progress', done, total}   one planned item landed
+ *                   {t:'plan-done', ok, error?} generation turn ended
  *                   {t:'error', message}
  *
  * Security model: bind localhost only, Origin allow-list, and a one-time
@@ -224,6 +229,16 @@ class BoardHub {
 			case 'compgen-cancel':
 				if (tab.registered && this.onCompGenCancel) this.onCompGenCancel(tab);
 				return;
+
+			case 'plan-cancel':
+				// User hit the ✕ on Mida's generation loader. Kill the continuation
+				// turn and drop the armed plan so a later batch is not re-arranged.
+				if (!tab.registered) return;
+				this.log('[plan] cancel requested by board ' + (tab.projectid || tab.id));
+				this.clearPlan(tab.projectid);
+				if (this.onPlanCancel) this.onPlanCancel(tab);
+				this._send(ws, { t: 'plan-done', ok: false, error: 'Cancelled.' });
+				return;
 		}
 	}
 
@@ -359,8 +374,13 @@ class BoardHub {
 	 * item lands, the batch is auto-arranged (bento + titled section) - the same
 	 * end state as the MockFlow AI multiboard pipeline. One plan per board;
 	 * a new plan replaces the old, an expired plan is simply forgotten.
+	 *
+	 * `send` (optional) is the frame sender for the tab that owns the plan. It is
+	 * kept on the plan so every counted draw can push a {t:'plan-progress'} frame
+	 * back - that is what drives Mida's "Generated X of Y items…" loader, the same
+	 * line the server multiboard flow writes from ai-multiboard-progress.
 	 */
-	armPlan(projectid, boardTitle, itemCount) {
+	armPlan(projectid, boardTitle, itemCount, send) {
 		const self = this;
 		const target = this._targetTab(projectid || null);
 		const key = target.tab.projectid || target.tab.id;
@@ -370,8 +390,13 @@ class BoardHub {
 				self.plans.set(key, {
 					boardTitle: boardTitle,
 					remaining: itemCount,
+					total: itemCount,
+					done: 0,
+					send: send || null,
 					expires: Date.now() + config.PLAN_TIMEOUT_MS
 				});
+				self.log('[plan] armed "' + boardTitle + '" on board ' + key + ': ' + itemCount + ' item(s)'
+					+ (send ? '' : ' (no progress channel - tab loader will not update)'));
 			});
 	}
 
@@ -403,23 +428,51 @@ class BoardHub {
 			if (self.pendingPicks.get(key) === pick) self.pendingPicks.delete(key);
 		};
 
+		// Progress channel for this plan: plan-start / plan-step / plan-progress /
+		// plan-done all go straight to the tab that answered the picker, so Mida can
+		// run the same loader the server multiboard turn runs.
+		const sendToTab = function(frame) { self._send(target.ws, frame); };
+
+		this.log('[plan] picker sent to board ' + key + ': "' + boardTitle + '" (' + items.length + ' item(s))');
+
 		this._request(target.ws, { t: 'plan-pick', boardTitle: boardTitle, items: items },
 			config.PLAN_PICK_TIMEOUT_MS)
 			.then(function(res) {
 				settle();
-				if (res && res.cancelled) return;  // user skipped the plan
+				if (res && res.cancelled) {          // user skipped the plan
+					self.log('[plan] picker skipped on board ' + key);
+					return;
+				}
 				var chosen = items;                // auto reply (no picker UI) -> full plan
 				if (res && Array.isArray(res.items)) {
 					var sel = res.items.map(function(i) { return items[i]; }).filter(Boolean);
-					if (!sel.length) return;
+					if (!sel.length) {
+						self.log('[plan] picker returned an empty selection on board ' + key + ' - nothing generated');
+						return;
+					}
 					chosen = sel;
 				}
-				return self.armPlan(projectid, boardTitle, chosen.length).then(function() {
+				self.log('[plan] confirmed on board ' + key + ': ' + chosen.length + ' of ' + items.length
+					+ ' item(s) [' + chosen.map(function(it) { return it.tool; }).join(', ') + ']'
+					+ (res && res.auto ? ' (auto - no picker UI in the tab)' : ''));
+				return self.armPlan(projectid, boardTitle, chosen.length, sendToTab).then(function() {
+					// Opens Mida's generation loader before the agent turn spawns, so the
+					// chat never sits silent between the click and the first draw.
+					sendToTab({
+						t: 'plan-start', boardTitle: boardTitle, total: chosen.length,
+						items: chosen.map(function(it) { return { name: it.name || '', tool: it.tool || '' }; })
+					});
 					if (self.onPlanGenerate)
-						self.onPlanGenerate(target.tab, { boardTitle: boardTitle, items: chosen });
+						self.onPlanGenerate(target.tab, { boardTitle: boardTitle, items: chosen }, sendToTab);
+					else
+						sendToTab({ t: 'plan-done', ok: false, error: 'Plan generation is not enabled on this bridge.' });
 				});
 			})
-			.catch(function() { settle(); });  // picker ignored past its window: nothing generates
+			.catch(function(err) {
+				settle();  // picker ignored past its window: nothing generates
+				self.log('[plan] picker unanswered on board ' + key + ' - nothing generated'
+					+ (err && err.message ? ' (' + err.message + ')' : ''));
+			});
 	}
 
 	/** True while the board's plan selection is still in front of the user. */
@@ -452,6 +505,13 @@ class BoardHub {
 			return Promise.resolve(null);
 		}
 		plan.remaining--;
+		plan.done++;
+		// "Generated X of Y items…" in Mida, same line the server flow writes from
+		// its ai-multiboard-progress socket event.
+		this.log('[plan] progress on board ' + key + ': ' + plan.done + '/' + plan.total);
+		if (plan.send) {
+			try { plan.send({ t: 'plan-progress', done: plan.done, total: plan.total }); } catch (e) {}
+		}
 		if (plan.remaining > 0) return Promise.resolve(null);
 		this.plans.delete(key);
 		return this.runOnBoard(key, { t: 'layout', boardTitle: plan.boardTitle })

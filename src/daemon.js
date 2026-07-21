@@ -44,7 +44,8 @@ async function start(opts) {
 	hub.onCompGenCancel = function(tab) { agents.cancelCompGen(tab); };
 	// plan_board continuation: the user clicked Generate Board in their tab -
 	// render the chosen items on a fresh headless turn (briefs are self-contained).
-	hub.onPlanGenerate = function(tab, plan) { agents.handlePlanGenerate(tab, plan, hub); };
+	hub.onPlanGenerate = function(tab, plan, sendToTab) { agents.handlePlanGenerate(tab, plan, hub, sendToTab); };
+	hub.onPlanCancel = function(tab) { agents.cancelPlanGenerate(tab); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly
 	// (only offer "brainstorm your files" when a workspace is actually set).
@@ -52,7 +53,11 @@ async function start(opts) {
 		hasLocalAgent: agents.detect(),
 		hasWorkspace: !!agents.hasWorkspace,
 		workspaceName: agents.hasWorkspace ? path.basename(agents.workspace) : null,
-		port: config.PORT
+		port: config.PORT,
+		// Dev setup (catalog points at a local MockFlow, or MFBRIDGE_DEBUG=1). The
+		// tab mirrors it to turn on its own console tracing, so bridge-side and
+		// browser-side logs are on together without anyone setting a flag by hand.
+		debug: config.DEBUG
 	};
 
 	const server = http.createServer(function(req, res) {
