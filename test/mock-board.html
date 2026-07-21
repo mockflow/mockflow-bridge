@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MockFlow Bridge - mock board</title>
+<style>
+	body { font-family: -apple-system, sans-serif; margin: 24px; max-width: 900px; }
+	#status { font-weight: 600; }
+	#pairbox { display: none; margin: 12px 0; }
+	#gdatalog { background: #f4f5f7; border-radius: 6px; padding: 12px; white-space: pre-wrap;
+		font-family: ui-monospace, monospace; font-size: 12px; max-height: 480px; overflow: auto; }
+	button, input { font-size: 14px; padding: 6px 10px; }
+</style>
+</head>
+<body>
+<h2>MockFlow Bridge - mock board page</h2>
+<p>Simulates an editor tab. Start the daemon with <code>MFBRIDGE_DEV=1 npx mockflow-bridge</code>
+(dev mode, so the file:// origin is allowed), then click connect and pair with the code from the
+daemon terminal. Every gdata the bridge pushes is logged below instead of drawn.</p>
+
+<p>Status: <span id="status">disconnected</span>
+	<button id="connectbtn">Connect</button>
+	<button id="disconnectbtn">Disconnect</button>
+</p>
+
+<div id="pairbox">
+	Pairing code: <input id="paircode" placeholder="123-456">
+	<button id="pairbtn">Pair</button>
+</div>
+
+<div id="gdatalog"></div>
+
+<script>
+// Minimal stub of the editor globals the bridge client touches.
+var stubComponents = [];
+var mf_main = {
+	editorController: {
+		projectObj: { id: 'mockboard1', title: 'Mock Board (test page)' },
+		page: {
+			childComponents: {
+				size: function() { return stubComponents.length; },
+				getItemAt: function(i) { return stubComponents[i]; },
+				removeItemAt: function(i) { stubComponents.splice(i, 1); },
+				addItemAt: function(c, i) { stubComponents.splice(i, 0, c); }
+			}
+		},
+		aiToolsController: {
+			showResults: function(gdata) {
+				stubComponents.push({
+					eid: 'e' + (stubComponents.length + 1),
+					cid: 'c' + (stubComponents.length + 1),
+					componentName: gdata.comp || gdata.aitype,
+					x: 100, y: 100 + stubComponents.length * 40, width: 400, height: 300
+				});
+				logLine('showResults <- ' + JSON.stringify(gdata, null, 2));
+			}
+		}
+	}
+};
+
+function logLine(text) {
+	var el = document.getElementById('gdatalog');
+	el.textContent += text + '\n\n';
+	el.scrollTop = el.scrollHeight;
+}
+</script>
+<script src="../browser/mockflow-bridge-client.js"></script>
+<script>
+var pendingSubmit = null;
+
+document.getElementById('connectbtn').onclick = function() {
+	MFBridgeClient.connect({
+		onStatus: function(s) {
+			document.getElementById('status').textContent = s;
+			document.getElementById('pairbox').style.display = (s === 'pairing') ? 'block' : 'none';
+		},
+		onPairRequired: function(submit) {
+			pendingSubmit = submit;
+			document.getElementById('status').textContent = 'pairing';
+			document.getElementById('pairbox').style.display = 'block';
+		},
+		onError: function(msg) { logLine('ERROR: ' + msg); }
+	});
+};
+
+document.getElementById('disconnectbtn').onclick = function() {
+	MFBridgeClient.disconnect();
+};
+
+document.getElementById('pairbtn').onclick = function() {
+	var code = document.getElementById('paircode').value;
+	if (pendingSubmit) pendingSubmit(code);
+	else MFBridgeClient.pair(code);
+};
+</script>
+</body>
+</html>
