@@ -12,6 +12,7 @@
  */
 
 const config = require('./config');
+const debug = require('./debug');
 
 const PROTOCOL_VERSION = '2025-03-26';
 
@@ -178,6 +179,9 @@ class McpEndpoint {
 			const entry = this._entry(name);
 			if (!entry) return this._err('Unknown tool: ' + name);
 
+			// Debug tracing: print/dump what the agent generated for this render (see debug.js).
+			debug.toolCall(name, args);
+
 			if (entry.clientIsHtmlConversion) {
 				// render_wireframelite / render_prototypelite ship raw HTML. The CONNECTED TAB
 				// runs the conversion (HTML -> paintObjects render, or the prototype S3 upload)
@@ -185,13 +189,18 @@ class McpEndpoint {
 				// result - the bridge only relays the args (see boardHub.drawHtml).
 				const mcpType = name.replace('render_', '');
 				const hres = await this.hub.drawHtml(args._projectid || null, name, mcpType, args);
+				// Conversion report from the tab (component/chart/icon counts + warnings). It
+				// goes back to the AGENT too: a sparse or icon-less render is something the
+				// agent can fix by regenerating the HTML, but only if it is told.
+				const report = debug.toolResult(name, hres);
+				const suffix = report ? '\n\nConversion report: ' + report : '';
 				if (hres && hres.arranged) {
 					return this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
 						+ 'was arranged automatically under "' + hres.boardTitle + '". You are done: do not call '
-						+ 'layout_board or any other tool, and never output a URL or a link.');
+						+ 'layout_board or any other tool, and never output a URL or a link.' + suffix);
 				}
 				return this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
-					+ 'It is already visible on their screen - do not output or ask the user to open a link.');
+					+ 'It is already visible on their screen - do not output or ask the user to open a link.' + suffix);
 			}
 
 			// Same pre-flight sanitization the desktop and web MCP servers run.

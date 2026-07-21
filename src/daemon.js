@@ -155,7 +155,13 @@ async function start(opts) {
 			: paint.yellow('✗ Claude Code not found - Mida local chat unavailable')],
 		['Workspace', agents.hasWorkspace
 			? ui.shortenPath(agents.workspace)
-			: paint.dim('off - add --workspace <path> to let Mida read one folder')]
+			: paint.dim('off - add --workspace <path> to let Mida read one folder')],
+		// Debug tracing (auto-on against a local MockFlow): every render_* call prints
+		// what the agent generated plus the conversion diagnostics. See src/debug.js.
+		['Debug', config.DEBUG
+			? paint.green('on') + ' - render output + diagnostics printed, dumps in '
+				+ ui.shortenPath(config.DEBUG_DIR)
+			: paint.dim('off - set MFBRIDGE_DEBUG=1 to trace what each render generates')]
 	], paint));
 	console.error('');
 	console.error(ui.pairingLine(hub.pairingCode.slice(0, 3) + '-' + hub.pairingCode.slice(3),

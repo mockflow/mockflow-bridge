@@ -16,6 +16,17 @@ const DEFAULT_PORT = 21196;
 
 const DEV = process.env.MFBRIDGE_DEV === '1';
 
+const CATALOG_URL = process.env.MFBRIDGE_CATALOG_URL
+	|| 'https://app.mockflow.com/call/api/mcpcatalog/ideaboard';
+
+// Debug tracing (src/debug.js): print everything the agent generates for a
+// render_* call plus the conversion diagnostics that come back, and dump the
+// payloads to ~/.mockflow/bridge-debug. ON by default when the catalog points
+// at a local MockFlow (a dev setup); MFBRIDGE_DEBUG=1/0 forces it on/off.
+const LOCAL_CATALOG = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(CATALOG_URL);
+const DEBUG = process.env.MFBRIDGE_DEBUG === '1'
+	|| (process.env.MFBRIDGE_DEBUG !== '0' && LOCAL_CATALOG);
+
 // Origins allowed to open the /board WebSocket. The bridge draws on whatever
 // board connects, so this list is a real security boundary: only MockFlow
 // editor origins (plus localhost/file in dev mode) may register as boards.
@@ -42,9 +53,11 @@ module.exports = {
 	PORT: parseInt(process.env.MFBRIDGE_PORT || String(DEFAULT_PORT), 10),
 
 	DEV: DEV,
+	DEBUG: DEBUG,
 	ALLOWED_ORIGINS: allowedOrigins,
 
 	HOME_DIR: HOME_DIR,
+	DEBUG_DIR: path.join(HOME_DIR, 'bridge-debug'),
 	PORT_FILE: path.join(HOME_DIR, 'bridge-port'),
 	TOKENS_FILE: path.join(HOME_DIR, 'bridge-tokens.json'),
 	CATALOG_CACHE_FILE: path.join(HOME_DIR, 'bridge-catalog-cache.js'),
@@ -53,8 +66,7 @@ module.exports = {
 	// schemas and mapping rules are fetched from MockFlow at startup so new AI
 	// components ship without an npm publish. The fetched copy is cached locally;
 	// if the endpoint is unreachable and there is no cache yet, startup fails.
-	CATALOG_URL: process.env.MFBRIDGE_CATALOG_URL
-		|| 'https://app.mockflow.com/call/api/mcpcatalog/ideaboard',
+	CATALOG_URL: CATALOG_URL,
 	CATALOG_FETCH_TIMEOUT_MS: 6000,
 
 	TOOL_TIMEOUT_MS: 60000,

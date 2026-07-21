@@ -76,11 +76,27 @@ ws.on('message', function(raw) {
 				+ JSON.stringify(frame.gdata).slice(0, 400));
 			send({ t: 'result', id: frame.id, ok: true, data: { rendered: frame.toolName } });
 			return;
-		case 'toolhtml':
+		case 'toolhtml': {
+			var fhtml = String((frame.args && frame.args.html) || '');
 			console.log('[fake-tab] TOOLHTML ' + frame.toolName + ' (' + frame.mcpType + ') html='
-				+ String((frame.args && frame.args.html) || '').slice(0, 200));
-			send({ t: 'result', id: frame.id, ok: true, data: { rendered: frame.toolName } });
+				+ fhtml.slice(0, 200));
+			// Stand in for the conversion report the real tab gets back from
+			// /call/api/html2paintobjects, so the bridge's debug path is testable.
+			var fdiag = frame.mcpType === 'wireframelite' ? {
+				htmlLength: fhtml.length,
+				captureWidth: (frame.args && frame.args.viewportWidth) || null,
+				captureMode: /<canvas/i.test(fhtml) ? 'charts' : 'plain',
+				canvasCount: (fhtml.match(/<canvas/gi) || []).length,
+				chartComponents: (fhtml.match(/data-chart-component/gi) || []).length,
+				svgIconRefs: (fhtml.match(/<img[^>]+src=["'][^"']*\.svg/gi) || []).length,
+				inlineSvgs: (fhtml.match(/<svg[\s>]/gi) || []).length,
+				iconFontTags: 0,
+				paintObjectCount: 42,
+				warnings: []
+			} : null;
+			send({ t: 'result', id: frame.id, ok: true, data: { rendered: frame.toolName, diagnostics: fdiag } });
 			return;
+		}
 		case 'read':
 			console.log('[fake-tab] READ board');
 			send({

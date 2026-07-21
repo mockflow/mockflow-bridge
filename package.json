@@ -8,7 +8,7 @@
 	"main": "src/daemon.js",
 	"scripts": {
 		"start": "node bin/mockflow-bridge.js",
-		"check": "node --check bin/mockflow-bridge.js && node --check src/config.js && node --check src/log.js && node --check src/ui.js && node --check src/catalog.js && node --check src/boardHub.js && node --check src/mcpEndpoint.js && node --check src/agentManager.js && node --check src/daemon.js && node --check src/stdioProxy.js && node --check browser/mockflow-bridge-client.js"
+		"check": "node --check bin/mockflow-bridge.js && node --check src/config.js && node --check src/log.js && node --check src/debug.js && node --check src/ui.js && node --check src/catalog.js && node --check src/boardHub.js && node --check src/mcpEndpoint.js && node --check src/agentManager.js && node --check src/daemon.js && node --check src/stdioProxy.js && node --check browser/mockflow-bridge-client.js"
 	},
 	"engines": {
 		"node": ">=18"

@@ -148,3 +148,35 @@ node test/fake-chat.js <pairing-code> "your message"      # Mode B chat loop
 `browser/mockflow-bridge-client.js` is the reference page-side client used by the
 test pages; keep its wire-protocol behavior in sync with the MockFlow editor's
 own client when changing frames.
+
+### Debugging what a render produced
+
+Everything an agent generates is handed to the board tab and vanishes from view,
+so debug tracing prints it instead. It is **on automatically when the catalog
+points at a local MockFlow** (`MFBRIDGE_CATALOG_URL=http://localhost:...`); force
+it with `MFBRIDGE_DEBUG=1`, or off with `MFBRIDGE_DEBUG=0`. The startup info card
+shows the current state.
+
+With it on, every `render_*` call prints the agent's payload (the full HTML for
+`render_wireframelite` / `render_prototypelite`, the args JSON otherwise) and
+dumps it to `~/.mockflow/bridge-debug/`. Open the dumped `.html` in a browser:
+what you see there is what the MockFlow capture sees, so missing icons or charts
+are visible immediately.
+
+For `render_wireframelite` the tab also returns a conversion report from the
+MockFlow server (`aitoolsManager.htmlToPaintObjects`, logged server-side as
+`[html2paintobjects]`). It is printed as `DIAGNOSTICS`, saved next to the HTML,
+and appended to the tool result so the AGENT sees it too:
+
+| Field | Reading it |
+| --- | --- |
+| `paintObjectCount` | components the board received. A real screen is dozens; single digits = the HTML was too sparse. |
+| `captureMode` | `charts` = chart-aware capture ran, `plain` = no chart markup was found. |
+| `canvasCount` / `chartComponents` | canvases in the HTML vs charts actually captured. A gap = the Chart.js contract was broken (missing `data-chart-component`, script tag, or init). |
+| `svgIconRefs` / `inlineSvgs` / `iconFontTags` | how the agent expressed icons. Only `svgIconRefs` (FontAwesome SVG URLs in `<img>`) convert; inline `<svg>` and `<i class="fa…">` capture as nothing. |
+| `warnings` | the plain-language version of all of the above. |
+
+Weak wireframes are almost always an HTML problem, not a conversion problem: the
+tool description in the catalog is what teaches the agent to emit dense sections,
+FontAwesome SVG icons and Chart.js canvases, so fix it there (the catalog is
+fetched from MockFlow, no npm publish needed) and re-read the diagnostics.

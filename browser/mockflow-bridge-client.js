@@ -181,7 +181,9 @@
 			return reply(frame.id, false, 'The ' + (frame.toolName || 'render') + ' call must include the complete HTML in the "html" argument.');
 		}
 
-		function drawFromTransform(mcpType, storedObj) {
+		// diagnostics: the conversion report the MockFlow server returned, echoed back with
+		// the result so the bridge console can explain a weak render (see src/debug.js).
+		function drawFromTransform(mcpType, storedObj, diagnostics) {
 			var transforms = ec.aiToolsController._mcpTransforms;
 			var tf = transforms && transforms[mcpType];
 			if (typeof tf !== 'function') return reply(frame.id, false, 'No client transform for ' + mcpType);
@@ -190,7 +192,7 @@
 				if (frame.fromconvert && gdata && gdata.data) gdata.data.fromconvert = frame.fromconvert;
 				takeSnapshotIfNeeded();
 				ec.aiToolsController.showResults(gdata);
-				reply(frame.id, true, { rendered: frame.toolName });
+				reply(frame.id, true, { rendered: frame.toolName, diagnostics: diagnostics || null });
 			} catch (e) {
 				reply(frame.id, false, (e && e.message) || 'showResults failed');
 			}
@@ -228,7 +230,7 @@
 				for (var k in args) stored[k] = args[k];
 				stored.paintObjects = resp.paintObjects;
 				if (!stored.title) stored.title = htmlDocTitle(args.html);
-				drawFromTransform('wireframelite', stored);
+				drawFromTransform('wireframelite', stored, resp.diagnostics || null);
 			});
 		} else if (frame.mcpType === 'prototypelite') {
 			var cid = MF_Utils.guidGenerator();

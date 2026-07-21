@@ -489,7 +489,12 @@ class BoardHub {
 		const self = this;
 		return this.runOnBoard(projectid, frame, config.HTML_TOOL_TIMEOUT_MS)
 			.then(function(res) {
-				return self._notePlannedDraw(key).then(function(arranged) { return arranged || res; });
+				return self._notePlannedDraw(key).then(function(arranged) {
+					// Keep the tab's conversion diagnostics on the result either way - the
+					// arranged branch replaces the payload and would otherwise drop them.
+					if (arranged && res && res.diagnostics) arranged.diagnostics = res.diagnostics;
+					return arranged || res;
+				});
 			});
 	}
 
