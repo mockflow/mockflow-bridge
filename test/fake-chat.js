@@ -9,6 +9,8 @@
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
+const T0 = Date.now();
+function el() { return '+' + ((Date.now() - T0) / 1000).toFixed(1) + 's '; }
 
 const PORT = process.env.MFBRIDGE_PORT || 21196;
 const TOKEN_FILE = path.join(__dirname, '.fake-tab-token');
@@ -44,10 +46,10 @@ ws.on('message', function(raw) {
 			send({ t: 'chat', id: 'turn1', text: message });
 			return;
 		case 'chat-delta':
-			console.log('[chat-test] DELTA: ' + JSON.stringify(frame.text).slice(0, 200));
+			console.log(el() + '[chat-test] DELTA: ' + JSON.stringify(frame.text).slice(0, 200));
 			return;
 		case 'chat-step':
-			console.log('[chat-test] STEP : ' + JSON.stringify(frame.step));
+			console.log(el() + '[chat-test] STEP : ' + JSON.stringify(frame.step));
 			return;
 		case 'chat-done':
 			console.log('[chat-test] DONE : ok=' + frame.ok + (frame.error ? ' error=' + frame.error : '') + ' text=' + JSON.stringify(frame.text || '').slice(0, 200));
@@ -55,6 +57,13 @@ ws.on('message', function(raw) {
 			return;
 		case 'tool':
 			console.log('[chat-test] TOOL ' + frame.toolName + ' (drawing on board)');
+			send({ t: 'result', id: frame.id, ok: true, data: { rendered: frame.toolName } });
+			return;
+		case 'toolhtml':
+			// HTML-conversion tools (render_wireframelite / render_prototypelite): the real
+			// tab posts to MockFlow first; here just acknowledge so the turn can finish.
+			console.log(el() + '[chat-test] TOOLHTML ' + frame.toolName + ' html='
+				+ String((frame.args && frame.args.html) || '').length + ' chars');
 			send({ t: 'result', id: frame.id, ok: true, data: { rendered: frame.toolName } });
 			return;
 	}

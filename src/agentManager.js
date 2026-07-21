@@ -230,6 +230,9 @@ class AgentManager {
 			'-p', text,
 			'--output-format', 'stream-json',
 			'--verbose',
+			// Announces each tool as it starts, so the board shows "Drawing …" while the
+			// agent is still writing the call instead of after it (see handleLine).
+			'--include-partial-messages',
 			'--mcp-config', this._mcpConfigPath(),
 			'--allowedTools', this._allowedTools(),
 			'--append-system-prompt', systemPrompt
@@ -256,11 +259,42 @@ class AgentManager {
 		var stepCounter = 0;
 		var buf = '';
 
+		// Open one step row for a tool the moment we learn of it. Idempotent per
+		// tool_use id: the partial stream announces the tool BEFORE its input is
+		// written, and the finished assistant message repeats it afterwards.
+		function startStep(toolId, toolName) {
+			var id = toolId || ('la_' + turnId + '_' + stepCounter);
+			if (openSteps[id]) return;
+			var stepId = 'la_' + turnId + '_' + (stepCounter++);
+			openSteps[id] = { stepId: stepId, started: Date.now() };
+			// "lite" is an internal product suffix, not something to show a user:
+			// render_wireframelite reads as "Drawing wireframe".
+			var label = String(toolName || 'tool').replace(/^mcp__mockflow__/, '')
+				.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
+			sendToTab({
+				t: 'chat-step', id: turnId,
+				step: { stepId: stepId, phase: 'start', tool: toolName, label: label, detail: '' }
+			});
+		}
+
 		function handleLine(line) {
 			var evt;
 			try { evt = JSON.parse(line); } catch (e) { return; }
 
 			if (evt.session_id && !session.sessionId) session.sessionId = evt.session_id;
+
+			// Partial stream (--include-partial-messages): content_block_start names the
+			// tool as soon as the model starts calling it. Without this the step row only
+			// appears once the whole tool_use block is written, which for the HTML tools
+			// means a long silent gap while thousands of characters of markup stream out.
+			if (evt.type === 'stream_event') {
+				var sev = evt.event || {};
+				if (sev.type === 'content_block_start' && sev.content_block
+					&& sev.content_block.type === 'tool_use') {
+					startStep(sev.content_block.id, sev.content_block.name);
+				}
+				return;
+			}
 
 			if (evt.type === 'assistant') {
 				var content = (evt.message && evt.message.content) || [];
@@ -270,13 +304,7 @@ class AgentManager {
 						replyText += (replyText ? '\n\n' : '') + block.text;
 						sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 					} else if (block.type === 'tool_use') {
-						var stepId = 'la_' + turnId + '_' + (stepCounter++);
-						openSteps[block.id || stepId] = { stepId: stepId, started: Date.now() };
-						var label = String(block.name || 'tool').replace(/^mcp__mockflow__/, '').replace(/^render_/, 'Drawing ').replace(/_/g, ' ');
-						sendToTab({
-							t: 'chat-step', id: turnId,
-							step: { stepId: stepId, phase: 'start', tool: block.name, label: label, detail: '' }
-						});
+						startStep(block.id, block.name);
 					}
 				}
 			} else if (evt.type === 'user') {
