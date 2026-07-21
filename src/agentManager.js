@@ -42,6 +42,27 @@ const PERSONA =
 	+ 'dashes in replies; use commas or periods instead.';
 
 /**
+ * Web-research guidance for turns that may draw real-world/current-data
+ * components (the catalog's `webResearch` flag). Appended to the turn's system
+ * prompt wherever WebSearch/WebFetch are allowed.
+ *
+ * The fallback half is the important half: search can be off, blocked by policy,
+ * or return nothing, and the turn must still draw. Without it a search-less setup
+ * silently stops generating.
+ *
+ * Search runs in the user's own Claude Code on their machine, billed to their own
+ * Claude plan - it never reaches MockFlow and costs no MockFlow AI credits.
+ * Content grounding itself (never invent names/figures) is NOT stated here: it
+ * lives in the catalog tool descriptions, so every agent gets it, not just this one.
+ */
+const RESEARCH_GUIDANCE =
+	' If the request depends on real-world, current, or factual data (live statistics, '
+	+ 'prices, dates, real places, market figures), first use WebSearch/WebFetch to get '
+	+ 'accurate up-to-date information. If web search is unavailable, errors, or returns '
+	+ 'nothing useful, do NOT stop - generate from your own knowledge instead and keep '
+	+ 'unknown specifics as neutral placeholders rather than inventing them.';
+
+/**
  * How to invoke the `claude` CLI portably. On Windows it is installed as a
  * .cmd shim which spawn() refuses to execute directly (EINVAL since the
  * CVE-2024-27980 hardening), so the call is routed through cmd.exe with
@@ -181,8 +202,18 @@ class AgentManager {
 		return p;
 	}
 
+	/**
+	 * Tools a chat turn may use. WebSearch/WebFetch are always allowed here,
+	 * unlike the component path which gates them on the catalog's `webResearch`
+	 * flag: a chat turn cannot know up front which render tool the agent will
+	 * choose, so the gate has nothing to test. RESEARCH_GUIDANCE keeps the
+	 * agent from searching on requests that do not need it.
+	 *
+	 * An install without web search is unaffected: --allowedTools is a permission
+	 * allowlist, so naming a tool the agent does not have simply never matches.
+	 */
 	_allowedTools() {
-		var tools = ['Read', 'Grep', 'Glob', 'mcp__mockflow__*'];
+		var tools = ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'mcp__mockflow__*'];
 		if (process.env.MFBRIDGE_ALLOW_WRITE === '1') tools.push('Write', 'Edit', 'Bash');
 		return tools.join(',');
 	}
@@ -226,7 +257,7 @@ class AgentManager {
 
 		// When no workspace is set the agent can read no files. If the user asks
 		// about their local files, answer helpfully instead of failing silently.
-		var systemPrompt = PERSONA;
+		var systemPrompt = PERSONA + RESEARCH_GUIDANCE;
 		if (!this.hasWorkspace) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
@@ -479,11 +510,8 @@ class AgentManager {
 		// it must never skip generating the component.
 		if (wantsResearch) {
 			allowed += ',WebSearch,WebFetch';
-			systemPrompt += ' If the request depends on real-world, current, or factual data '
-				+ '(live statistics, prices, dates, real places, market figures), first use WebSearch/WebFetch '
-				+ 'to get accurate up-to-date information. If web search is unavailable, errors, or returns nothing '
-				+ 'useful, do NOT stop - generate the component from your own knowledge instead. Always finish by '
-				+ 'calling the render tool with complete data.';
+			systemPrompt += RESEARCH_GUIDANCE
+				+ ' Always finish by calling the render tool with complete data.';
 		}
 
 		const args = [
@@ -633,7 +661,7 @@ class AgentManager {
 		// Only the tools the plan actually uses.
 		const toolSet = {};
 		for (var i = 0; i < items.length; i++) toolSet['mcp__mockflow__' + items[i].tool] = true;
-		const allowed = Object.keys(toolSet).join(',');
+		var allowed = Object.keys(toolSet).join(',');
 
 		const lines = items.map(function(it, i) {
 			return (i + 1) + '. ' + (it.name || 'Item') + ' [tool: ' + it.tool + ']: ' + (it.brief || '');
@@ -641,12 +669,22 @@ class AgentManager {
 		const prompt = 'The user confirmed this board plan - render it now.\n'
 			+ 'Board: "' + (plan.boardTitle || 'Board') + '"\nItems (render in this order):\n' + lines.join('\n');
 
-		const systemPrompt = 'You render the items of a board plan the user just confirmed on their live '
+		var systemPrompt = 'You render the items of a board plan the user just confirmed on their live '
 			+ 'MockFlow board. Call each item\'s listed render tool exactly once, in order, with complete, '
 			+ 'well-formed data built from its brief. If several items are wireframe screens of one app, keep '
 			+ 'ONE shared design system and pass the SAME viewportWidth on every screen. The board arranges '
 			+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
 			+ 'the plan, do not chat, and never output a URL or a link.';
+
+		// Same gate as the component path: when the plan contains a real-world /
+		// current-data component (catalog `webResearch`), let the agent ground the
+		// batch before drawing. Previously this path had no research affordance at
+		// all, so a planned table of live figures was drawn from training data.
+		if (this._toolWantsResearch(items.map(function(it) { return it.tool; }))) {
+			allowed += ',WebSearch,WebFetch';
+			systemPrompt += RESEARCH_GUIDANCE
+				+ ' Always finish by rendering every planned item.';
+		}
 
 		const args = [
 			'-p', prompt,
