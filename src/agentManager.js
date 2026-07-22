@@ -511,13 +511,20 @@ class AgentManager {
 		// component's own tool. The prompt is self-contained: the reference design
 		// travels inside it (built client-side as localAgentPrompt).
 		const isSimilar = (mode === 'createsimilar');
-		const tools = isConvert ? [] : this._toolsForComptype(comptype, isSimilar);
+		// One-shot prompt surfaces (AI Prompt Box): the user asked for something to
+		// be drawn, so this draws a NEW component like Convert - but from a plain
+		// request rather than an existing component's data. Restricted to the
+		// requested component's tool when the surface named one, free choice
+		// otherwise ("Any (AI decides)").
+		const isGenerate = (mode === 'generate');
+		const tools = (isConvert || isGenerate) ? (isGenerate ? this._toolsForComptype(comptype, true) : [])
+			: this._toolsForComptype(comptype, isSimilar);
 		const wantsResearch = !isConvert && this._toolWantsResearch(tools);
 
 		if (!prompt) {
 			return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'Empty prompt' });
 		}
-		if (!isConvert && tools.length === 0) {
+		if (!isConvert && !isGenerate && tools.length === 0) {
 			return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'No local tool for component ' + comptype });
 		}
 		if (!this.detect()) {
@@ -537,13 +544,23 @@ class AgentManager {
 		// Create/Modify fill the component in place: arm the capture so the agent's
 		// render_<tool> call routes back to this tab instead of drawing new.
 		// Convert and create-similar draw a NEW component, so no capture.
-		if (!isConvert && !isSimilar) hub.setCapture(tab.projectid, turnId, sendToTab);
-		// Convert draws a NEW component; tag it with its source so the client connects
-		// and positions it relative to the source (parity with server convert).
-		if (isConvert && frame.fromconvert && tab.projectid) hub.convertContext.set(tab.projectid, frame.fromconvert);
+		if (!isConvert && !isSimilar && !isGenerate) hub.setCapture(tab.projectid, turnId, sendToTab);
+		// Convert and prompt-box generations draw a NEW component; tag it with its
+		// source so the client connects and positions it relative to that source
+		// (parity with the server flow's fromconvert).
+		if ((isConvert || isGenerate) && frame.fromconvert && tab.projectid) hub.convertContext.set(tab.projectid, frame.fromconvert);
 
 		var systemPrompt, allowed;
-		if (isConvert) {
+		if (isGenerate) {
+			systemPrompt = 'The user asked for something to be drawn on their MockFlow board. Choose the '
+				+ (tools.length ? 'ONE tool from [' + tools.join(', ') + ']' : 'ONE mockflow render tool')
+				+ ' that best fits the request and call it exactly once with complete, well-formed data. '
+				+ 'Do not draw anything else, do not call any other tool, do not chat, do not output any text, '
+				+ 'and never output a URL or a link.';
+			allowed = tools.length
+				? tools.map(function(t) { return 'mcp__mockflow__' + t; }).join(',')
+				: 'mcp__mockflow__*';
+		} else if (isConvert) {
 			systemPrompt = 'You convert a MockFlow component into the different component the user asked for. '
 				+ 'Draw that component on the board with the correct mockflow render tool, using the data provided. '
 				+ 'Call exactly one render tool. Do not chat, do not output any text, and never output a URL or a link.';
