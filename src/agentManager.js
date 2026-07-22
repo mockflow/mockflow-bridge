@@ -39,7 +39,10 @@ const PERSONA =
 	+ 'Your text replies show in a small chat bubble: keep them short, friendly and plain. '
 	+ 'Never output URLs, file paths or markdown links, and never tell the user to open '
 	+ 'anything - what you draw is already on their board. Never use em dashes or en '
-	+ 'dashes in replies; use commas or periods instead.';
+	+ 'dashes in replies; use commas or periods instead. '
+	+ 'You have no way to prompt the user mid-turn: any tool that would ask them a '
+	+ 'question, request permission, or wait for input is unavailable and will fail. '
+	+ 'When you need something from the user, end your reply with the question and stop.';
 
 /**
  * Web-research guidance for turns that may draw real-world/current-data
@@ -232,6 +235,24 @@ class AgentManager {
 		for (const k of keys) this.clearAttachments(k);
 	}
 
+	/**
+	 * Whether a tool the agent reached for is one this turn is allowed to run.
+	 * Driven by the turn's own --allowedTools string, so it stays correct as that
+	 * list changes and needs no list of tool names of its own.
+	 */
+	_isRunnableTool(toolName, allowedTools) {
+		var name = String(toolName || '');
+		if (!name) return false;
+		var allowed = String(allowedTools || '').split(',');
+		for (var i = 0; i < allowed.length; i++) {
+			var a = allowed[i].trim();
+			if (!a) continue;
+			if (a === name) return true;
+			if (a.slice(-1) === '*' && name.indexOf(a.slice(0, -1)) === 0) return true;
+		}
+		return false;
+	}
+
 	detect() {
 		if (this.available !== null) return this.available;
 		try {
@@ -335,6 +356,7 @@ class AgentManager {
 			}
 		}
 
+		const allowedTools = this._allowedTools();
 		const args = [
 			'-p', turnText,
 			'--output-format', 'stream-json',
@@ -343,7 +365,7 @@ class AgentManager {
 			// agent is still writing the call instead of after it (see handleLine).
 			'--include-partial-messages',
 			'--mcp-config', this._mcpConfigPath(),
-			'--allowedTools', this._allowedTools(),
+			'--allowedTools', allowedTools,
 			'--append-system-prompt', systemPrompt
 		];
 		// Attachments live outside the workspace (and there may be no workspace at
@@ -376,6 +398,11 @@ class AgentManager {
 		// tool_use id: the partial stream announces the tool BEFORE its input is
 		// written, and the finished assistant message repeats it afterwards.
 		function startStep(toolId, toolName) {
+			// A tool outside this turn's allowlist is denied by the agent, so a row
+			// for it would only ever resolve as a red failure. Keep those out of the
+			// board's timeline: the user cares about work that can happen, not about
+			// the agent probing its own toolbox.
+			if (!self._isRunnableTool(toolName, allowedTools)) return;
 			var id = toolId || ('la_' + turnId + '_' + stepCounter);
 			if (openSteps[id]) return;
 			var stepId = 'la_' + turnId + '_' + (stepCounter++);
