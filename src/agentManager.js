@@ -45,6 +45,8 @@ const PERSONA =
 	+ 'Never output URLs, file paths or markdown links, and never tell the user to open '
 	+ 'anything - what you draw is already on their board. Never use em dashes or en '
 	+ 'dashes in replies; use commas or periods instead. '
+	+ 'If a render tool answers with an error saying which arguments it expects, nothing was '
+	+ 'drawn: fix those arguments and call it again instead of reporting failure to the user. '
 	+ 'You have no way to prompt the user mid-turn: any tool that would ask them a '
 	+ 'question, request permission, or wait for input is unavailable and will fail. '
 	+ 'When you need something from the user, end your reply with the question and stop.';
@@ -77,6 +79,21 @@ const RESEARCH_GUIDANCE =
 function toolStepLabel(toolName) {
 	return String(toolName || 'tool').replace(/^mcp__mockflow__/, '')
 		.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
+}
+
+/**
+ * The most useful line of an agent's stderr, for the "it exited unexpectedly"
+ * message. Agents colorize and pad their errors, so the literal last line is
+ * often blank or an escape sequence - which is how a real cause (e.g. opencode
+ * failing to open its own log file) reaches the user as "( )".
+ */
+function lastErrorLine(stderrTail, max) {
+	const lines = String(stderrTail || '')
+		.replace(/\x1b\[[0-9;]*m/g, '')
+		.split('\n')
+		.map(function(l) { return l.trim(); })
+		.filter(Boolean);
+	return lines.length ? lines[lines.length - 1].slice(0, max || 200) : '';
 }
 
 /** Stop an agent process. On Windows the process is a cmd.exe wrapper, so a
@@ -176,7 +193,7 @@ class AgentManager {
 	 * outside it.
 	 */
 	_saveAttachment(key, attachment) {
-		const dir = path.join(config.HOME_DIR, 'attachments', String(key).replace(/[^\w.-]/g, '_'));
+		const dir = path.join(config.ATTACHMENTS_DIR, String(key).replace(/[^\w.-]/g, '_'));
 		fs.mkdirSync(dir, { recursive: true });
 		this.attachDirs.set(key, dir);
 
@@ -251,6 +268,22 @@ class AgentManager {
 		return this.available;
 	}
 
+	/**
+	 * Swap the CLI that answers from here on (`mockflow-bridge agent <id>` against
+	 * a running bridge). Sessions are dropped because a resume id belongs to the
+	 * agent that issued it - the next turn on each board starts fresh instead of
+	 * handing one CLI's session id to another. In-flight turns finish on the agent
+	 * that started them.
+	 */
+	setAgent(agent) {
+		if (!agent || agent === this.agent) return false;
+		this.agent = agent;
+		this.available = null;
+		this.sessions.forEach(function(session) { session.sessionId = null; });
+		this.log('Agent switched to ' + agent.label + ' - board sessions reset.');
+		return true;
+	}
+
 	/** What to tell the user when the selected agent is not installed. */
 	missingHint() {
 		return this.agent.installHint();
@@ -266,6 +299,26 @@ class AgentManager {
 	 * An install without web search is unaffected: --allowedTools is a permission
 	 * allowlist, so naming a tool the agent does not have simply never matches.
 	 */
+	/**
+	 * "render_gantt takes: columns, settings." for the tools a turn may call.
+	 *
+	 * Purely registry-driven (the catalog carries each tool's input schema), so it
+	 * stays right as tools change. Agents do get the schema over MCP, but not all
+	 * of them read it before writing the call - naming the top-level arguments in
+	 * the instructions costs a line and saves a rejected first attempt.
+	 */
+	_toolArgHint(tools) {
+		if (!this.registry || !tools || !tools.length) return '';
+		const parts = [];
+		for (var i = 0; i < tools.length && i < 4; i++) {
+			const entry = this.registry.filter(function(e) { return e.mcpToolName === tools[i]; })[0];
+			const schema = entry && entry.mcpInputSchema;
+			const names = schema && schema.properties ? Object.keys(schema.properties) : [];
+			if (names.length) parts.push(tools[i] + ' takes: ' + names.join(', '));
+		}
+		return parts.length ? parts.join('. ') + '.' : '';
+	}
+
 	_allowedTools() {
 		var tools = ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'mcp__mockflow__*'];
 		if (process.env.MFBRIDGE_ALLOW_WRITE === '1') tools.push('Write', 'Edit', 'Bash');
@@ -413,7 +466,16 @@ class AgentManager {
 					replyText += (self.agent.capabilities.textChunks === 'delta')
 						? ev.text
 						: (replyText ? '\n\n' : '') + ev.text;
-					sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
+					// Only agents that really stream get to update the bubble mid-turn.
+					// A non-streaming agent emits its preamble ("I'll draw that now") as a
+					// finished message and then goes quiet for many seconds while it writes
+					// the tool call: pushing that text out ends the tab's thinking state, so
+					// the turn looks finished and then jumps back to life when the drawing
+					// starts. Holding it keeps one honest "working" state until there is
+					// something to show. finish() flushes whatever was held.
+					if (self.agent.capabilities.streamsPartialText) {
+						sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
+					}
 				} else if (ev.type === 'tool-start') {
 					startStep(ev.id, ev.name);
 				} else if (ev.type === 'tool-end') {
@@ -453,6 +515,12 @@ class AgentManager {
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
 			}
+			// The text a non-streaming agent produced was held back (see handleLine):
+			// deliver it as one delta first, so a tab that renders the bubble from
+			// deltas gets it whether or not it also reads chat-done.text.
+			if (!self.agent.capabilities.streamsPartialText && replyText) {
+				sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
+			}
 			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error });
 		}
 
@@ -465,7 +533,7 @@ class AgentManager {
 			if (code !== 0 && !replyText) {
 				self.log('Agent exited ' + code + ': ' + stderrTail);
 				finish(false, 'The local agent exited unexpectedly'
-					+ (stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 200) + ')' : '') + '.');
+					+ (lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : '') + '.');
 			} else {
 				finish(true, null);
 			}
@@ -594,6 +662,17 @@ class AgentManager {
 			}
 		}
 
+		// "Exactly once" is about not drawing twice, not about giving up on the
+		// first error. Taken literally - as a strict agent does - a call rejected
+		// for malformed arguments ends the turn with nothing generated, and the
+		// component falls back to the server AI even though the fix was one retry
+		// away. Say what "once" means, and name the arguments the tool actually
+		// wants so the first attempt is usually right.
+		systemPrompt += ' A call that comes back with an error drew nothing and does not count as your one '
+			+ 'call: read the error, fix the arguments it names, and call the tool again (up to three tries).';
+		const argHint = this._toolArgHint(tools);
+		if (argHint) systemPrompt += ' ' + argHint;
+
 		// Real-world/current-data components: let the agent web-research first, but
 		// ALWAYS fall back to its own knowledge if search is off/unavailable/empty -
 		// it must never skip generating the component.
@@ -613,6 +692,10 @@ class AgentManager {
 
 		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
 			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + this.workspace);
+		// What the CLI was actually asked to do. Every "it behaved differently than
+		// when I ran it by hand" bug so far came down to a flag the turn did or did
+		// not carry, and there is no other way to see the spawned command line.
+		if (config.DEBUG) this.log('[debug] ' + this.agent.id + ' argv: ' + JSON.stringify(spec.args));
 
 		var proc;
 		try {
@@ -697,7 +780,7 @@ class AgentManager {
 			if (code !== 0 && !toolCalled) {
 				self.log('Component AI exited ' + code + ': ' + stderrTail);
 				finish(false, 'The local agent exited unexpectedly'
-					+ (stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 200) + ')' : '') + '.', true);
+					+ (lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : '') + '.', true);
 			} else {
 				finish(true, null, false);
 			}
@@ -875,14 +958,14 @@ class AgentManager {
 			}
 			self.log('[plan] generate ' + what + ' for "' + (tab.title || key) + '": '
 				+ stepCounter + ' of ' + items.length + ' item(s) started'
-				+ (!ok && stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 200) + ')' : ''));
+				+ (!ok && lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : ''));
 			send({ t: 'plan-done', ok: ok, error: error || null });
 		};
 		proc.on('error', function(err) { done('failed to run', false, 'Local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
 			if (code === 0) done('finished', true, null);
 			else done('exited ' + code, false, 'The local agent stopped before finishing the board'
-				+ (stderrTail ? ' (' + stderrTail.split('\n').pop().slice(0, 160) + ')' : '') + '.');
+				+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
 		});
 	}
 

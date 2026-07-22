@@ -249,6 +249,15 @@ class BoardHub {
 		try { ws.send(JSON.stringify(frame)); } catch (e) {}
 	}
 
+	/** Push a frame to every registered tab (e.g. the agent changed under them).
+	 *  Clients that do not know the frame ignore it. */
+	broadcast(frame) {
+		const self = this;
+		this.tabs.forEach(function(tab, ws) {
+			if (tab.registered) self._send(ws, frame);
+		});
+	}
+
 	// ---- board targeting -----------------------------------------------------
 
 	listBoards() {
@@ -578,9 +587,13 @@ class BoardHub {
 			return self._request(target.ws, frame, timeoutMs || config.TOOL_TIMEOUT_MS);
 		});
 		this.queues.set(key, run);
+		// .finally() returns a NEW promise that inherits the rejection. The caller
+		// catches `run`, not this one, so a tab that answers {ok:false} used to end
+		// the process as an unhandled rejection - one failed draw taking the whole
+		// bridge down with it. The cleanup must swallow what it re-raises.
 		run.finally(function() {
 			if (self.queues.get(key) === run) self.queues.delete(key);
-		});
+		}).catch(function() {});
 		return run;
 	}
 

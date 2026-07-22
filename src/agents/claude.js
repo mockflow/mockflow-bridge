@@ -10,35 +10,12 @@
  * src/agents/index.js for the contract itself.
  */
 
-const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
-/**
- * How to invoke the CLI portably. On Windows it is installed as a .cmd shim
- * which spawn() refuses to execute directly (EINVAL since the CVE-2024-27980
- * hardening), so the call is routed through cmd.exe with cross-spawn style
- * argument escaping. Everywhere else it is a plain spawn.
- */
-function spawnSpec(args) {
-	if (process.platform !== 'win32') return { file: 'claude', args: args, opts: {} };
-	const line = ['claude'].concat(args.map(escapeCmdArgument)).join(' ');
-	return {
-		file: 'cmd.exe',
-		args: ['/d', '/s', '/c', '"' + line + '"'],
-		opts: { windowsVerbatimArguments: true }
-	};
-}
-
-/** cmd.exe argument escaping (same rules as the cross-spawn package):
- *  backslash-double quotes, quote the whole arg, caret-escape metachars. */
-function escapeCmdArgument(arg) {
-	arg = String(arg).replace(/(\\*)"/g, '$1$1\\"');
-	arg = arg.replace(/(\\*)$/, '$1$1');
-	arg = '"' + arg + '"';
-	return arg.replace(/([()\][%!^"`<>&|;, *?])/g, '^$1');
-}
+const BIN = 'claude';
 
 /** The bridge's MCP endpoint, as a config file this CLI can be pointed at. */
 function mcpConfigPath() {
@@ -78,8 +55,7 @@ module.exports = {
 	detect() {
 		if (_available !== null) return _available;
 		try {
-			const spec = spawnSpec(['--version']);
-			const r = spawnSync(spec.file, spec.args, Object.assign({ encoding: 'utf8' }, spec.opts));
+			const r = spawnCliSync(BIN, ['--version'], { encoding: 'utf8' });
 			_available = { available: r.status === 0, version: (r.stdout || '').trim() };
 		} catch (e) {
 			_available = { available: false, version: '' };
@@ -90,6 +66,19 @@ module.exports = {
 	installHint() {
 		return 'Claude Code is not installed on this machine. Install it with: '
 			+ 'npm i -g @anthropic-ai/claude-code, sign in once with `claude`, then try again.';
+	},
+
+	/**
+	 * How to point this CLI at the bridge when the user drives it themselves in a
+	 * terminal. (In-editor turns need none of this - agentManager passes the MCP
+	 * config per run.) Fallback only: a catalog that carries `agentWiring.claude`
+	 * wins, so a syntax change ships without an npm publish - see src/catalog.js.
+	 */
+	mcpAddHint(endpoint) {
+		return {
+			title: 'Add to Claude Code:',
+			lines: ['claude mcp add --transport http -s user mockflow ' + endpoint]
+		};
 	},
 
 	/**
@@ -117,8 +106,7 @@ module.exports = {
 	},
 
 	spawn(args, opts) {
-		const spec = spawnSpec(args);
-		return spawn(spec.file, spec.args, Object.assign({}, opts, spec.opts));
+		return spawnCli(BIN, args, opts);
 	},
 
 	/**

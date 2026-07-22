@@ -11,9 +11,11 @@
  * differ freely.
  */
 
-const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const config = require('../config');
+const { spawnCli, spawnCliSync } = require('./spawnPortable');
+
+const BIN = 'opencode';
 
 /** Bridge MCP endpoint, including the token the daemon minted. */
 function mcpUrl() {
@@ -72,7 +74,7 @@ module.exports = {
 	detect() {
 		if (_available !== null) return _available;
 		try {
-			const r = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
+			const r = spawnCliSync(BIN, ['--version'], { encoding: 'utf8' });
 			_available = { available: r.status === 0, version: (r.stdout || '').trim() };
 		} catch (e) {
 			_available = { available: false, version: '' };
@@ -83,6 +85,22 @@ module.exports = {
 	installHint() {
 		return 'opencode is not installed on this machine. Install it from https://opencode.ai, '
 			+ 'sign in once with `opencode`, then try again.';
+	},
+
+	/**
+	 * How to point this CLI at the bridge when the user drives it themselves in a
+	 * terminal. opencode has no `mcp add` command - servers are declared in its
+	 * config file. Fallback only: a catalog that carries `agentWiring.opencode`
+	 * wins - see src/catalog.js.
+	 */
+	mcpAddHint(endpoint) {
+		return {
+			title: 'Add to opencode  (~/.config/opencode/opencode.json):',
+			lines: [
+				'"mcp": { "mockflow": { "type": "remote", "enabled": true,',
+				'                       "url": "' + endpoint + '" } }'
+			]
+		};
 	},
 
 	buildArgs(turn) {
@@ -117,7 +135,7 @@ module.exports = {
 	},
 
 	spawn(args, opts) {
-		return spawn('opencode', args, opts || {});
+		return spawnCli(BIN, args, opts);
 	},
 
 	/**

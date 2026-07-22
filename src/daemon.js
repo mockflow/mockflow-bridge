@@ -111,8 +111,45 @@ async function start(opts) {
 				version: config.ENGINE_VERSION,
 				catalog: loaded.source,
 				tools: loaded.registry.length,
+				// Which CLI is answering right now (it can be switched while running),
+				// so `mockflow-bridge status` reports the live one, not a re-resolution.
+				agent: agents.agent ? agents.agent.id : null,
+				agentLabel: agents.agent ? agents.agent.label : null,
+				agentAvailable: agents.detect(),
+				workspace: agents.hasWorkspace ? agents.workspace : null,
 				boards: hub.listBoards()
 			}));
+		}
+
+		// Live agent switch from `mockflow-bridge agent <id>`, so changing agent does
+		// not mean restarting a paired bridge. Token-gated and CORS-less for the
+		// same reason as /mcp: a web page must not be able to drive it.
+		if (req.method === 'POST' && url === '/agent/' + mcpToken) {
+			var abody = '';
+			req.on('data', function(c) {
+				abody += c;
+				if (abody.length > 4096) req.destroy();
+			});
+			req.on('end', function() {
+				var wanted;
+				try { wanted = (JSON.parse(abody) || {}).agent; } catch (e) {}
+				const target = agentRegistry.byId(wanted);
+				const isInstalled = !!agentRegistry.installed().filter(function(r) { return r.id === wanted; })[0];
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				if (!target) {
+					return res.end(JSON.stringify({ ok: false, error: 'unknown agent "' + wanted + '"' }));
+				}
+				if (!isInstalled) {
+					return res.end(JSON.stringify({ ok: false, error: target.label + ' is not installed' }));
+				}
+				agents.setAgent(target);
+				hub.agentInfo.agentId = target.id;
+				hub.agentInfo.agentName = target.label;
+				hub.agentInfo.hasLocalAgent = agents.detect();
+				hub.broadcast({ t: 'agent-info', agentInfo: hub.agentInfo });
+				res.end(JSON.stringify({ ok: true, agent: target.id, label: target.label }));
+			});
+			return;
 		}
 
 		// MCP clients are local processes, so this route deliberately sends NO CORS
@@ -130,10 +167,25 @@ async function start(opts) {
 					return sendRpc(res, null, null, { code: -32700, message: 'Parse error' });
 				}
 				const id = rpc && rpc.id;
+				// A JSON-RPC notification (no id, e.g. notifications/initialized) must
+				// get NO response body - Streamable HTTP answers it with 202. Replying
+				// `{"id":null,"result":{}}` is not a valid message and strict clients
+				// drop the connection over it: Codex's rmcp transport quits with
+				// "did not match any variant of untagged enum JsonRpcMessage", which
+				// leaves the agent with no MockFlow tools at all.
+				const isNotification = !rpc || rpc.id === undefined || rpc.id === null;
 				try {
 					const result = await mcp.handle(rpc && rpc.method, (rpc && rpc.params) || {});
+					if (isNotification) {
+						res.writeHead(202);
+						return res.end();
+					}
 					sendRpc(res, id, result, null);
 				} catch (err) {
+					if (isNotification) {
+						res.writeHead(202);
+						return res.end();
+					}
 					sendRpc(res, id, null, { code: -32603, message: String((err && err.message) || err) });
 				}
 			});
@@ -192,7 +244,8 @@ async function start(opts) {
 		['Board socket', 'ws://' + config.HOST + ':' + config.PORT + '/board'],
 		['Catalog', loaded.source + ' (' + loaded.registry.length + ' tools)'],
 		['Local agent', agents.detect()
-			? paint.green('✓') + ' ' + picked.agent.label + ' (' + describeAgents(picked.choices) + ')'
+			? paint.green('✓') + ' ' + picked.agent.label + ' ' + paint.dim('(' + describeAgents(picked.choices)
+				+ (picked.choices.length > 1 ? '; change: mockflow-bridge agent' : '') + ')')
 			: paint.yellow('✗ no supported agent CLI found - Mida local chat unavailable')],
 		['Workspace', agents.hasWorkspace
 			? ui.shortenPath(agents.workspace)
@@ -226,9 +279,22 @@ async function start(opts) {
 		], paint.yellow, paint));
 	}
 	console.error('');
-	console.error('  ' + paint.bold('Add to Claude Code:'));
-	console.error('    ' + paint.teal('claude mcp add --transport http -s user mockflow ' + endpoint + '/mcp/' + mcpToken));
-	console.error('  ' + paint.dim('Or for stdio-only clients:  command: npx @mockflow/mockflow-bridge stdio'));
+	// Wiring hint for the agent that is actually in use - telling a Codex user how
+	// to configure Claude Code is noise. Only for driving the CLI directly; the
+	// in-editor turns the bridge runs itself need no setup. The catalog may carry
+	// the line (so vendor syntax changes ship without a publish); the adapter's own
+	// mcpAddHint is the fallback.
+	const wiring = catalogLoader.wiringFor(loaded.registry, picked.agent, endpoint + '/mcp/' + mcpToken);
+	if (wiring) {
+		console.error('  ' + paint.bold(wiring.title));
+		wiring.lines.forEach(function(l) { console.error('    ' + paint.teal(l)); });
+		console.error('  ' + paint.dim('Only needed to use the CLI directly - in-editor chat already works.'));
+		console.error('');
+	}
+	console.error('  ' + paint.dim('Commands:') + '  ' + paint.teal('mockflow-bridge help')
+		+ paint.dim('  ·  ') + paint.teal('status')
+		+ paint.dim('  ·  ') + paint.teal('agent') + paint.dim(' (switch agent)')
+		+ paint.dim('  ·  ') + paint.teal('reset'));
 	console.error('');
 
 	function shutdown() {
@@ -309,7 +375,8 @@ async function resolveAgent(registry, explicit) {
 
 	if (picked.reason === 'unknown-agent') {
 		const known = registry.AGENTS.map(function(a) { return a.id; }).join(', ');
-		throw new Error('Unknown agent "' + explicit + '". Known agents: ' + known + '.');
+		throw new Error('Unknown agent "' + explicit + '". Known agents: ' + known
+			+ '. Run `mockflow-bridge agent` to see which are installed.');
 	}
 	if (picked.reason !== 'ambiguous') return picked;
 
@@ -320,29 +387,9 @@ async function resolveAgent(registry, explicit) {
 		return { agent: first.agent, reason: 'auto', choices: picked.choices };
 	}
 
-	const chosen = await askWhichAgent(picked.choices);
+	const chosen = await require('./agentPicker').ask(picked.choices, null);
 	registry.savePreference(chosen.id);
 	return { agent: chosen.agent, reason: 'asked', choices: picked.choices };
-}
-
-/** One-time terminal picker. Any invalid answer falls through to the first. */
-function askWhichAgent(choices) {
-	const paint = ui.err;
-	console.error('');
-	console.error(paint.bold('Which agent should MockFlow run local turns on?'));
-	choices.forEach(function(c, i) {
-		console.error('  ' + paint.teal(String(i + 1)) + '. ' + c.label + (c.version ? paint.dim(' ' + c.version) : ''));
-	});
-	console.error(paint.dim('  (remembered for next time - change it with --agent)'));
-	return new Promise(function(resolve) {
-		const readline = require('readline');
-		const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-		rl.question('  Choice [1]: ', function(answer) {
-			rl.close();
-			const idx = parseInt(String(answer).trim(), 10) - 1;
-			resolve(choices[idx] || choices[0]);
-		});
-	});
 }
 
 function describeAgents(choices) {

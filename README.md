@@ -111,13 +111,23 @@ the drawing that appears on your board is saved.
 ## If you have more than one assistant installed
 
 The first time you start the bridge with several installed, it asks which one
-to use and remembers your answer. To change it later:
+to use and remembers your answer. To see or change it later:
 
 ```bash
-npx @mockflow/mockflow-bridge --agent claude
+npx @mockflow/mockflow-bridge agent          # which are installed, which one is in use
+npx @mockflow/mockflow-bridge agent codex    # switch to that one and remember it
+npx @mockflow/mockflow-bridge agent pick     # choose from a list
+npx @mockflow/mockflow-bridge agent clear    # forget the choice (ask again next start)
+```
+
+Switching takes effect immediately: if a bridge is already running, it changes
+agent in place, so you do not have to stop it or pair your board again. Open
+chats simply start a fresh conversation on the new assistant.
+
+To use a different agent for one run only, without changing the saved choice:
+
+```bash
 npx @mockflow/mockflow-bridge --agent opencode
-npx @mockflow/mockflow-bridge --agent codex
-npx @mockflow/mockflow-bridge --agent cursor
 ```
 
 They differ in small ways (web search, attachments, reading your files). See
@@ -128,13 +138,29 @@ They differ in small ways (web search, attachments, reading your files). See
 ```bash
 npx @mockflow/mockflow-bridge           # start it (leave the window open)
 npx @mockflow/mockflow-bridge status    # is it running, which boards are connected
-npx @mockflow/mockflow-bridge help      # all options
+npx @mockflow/mockflow-bridge agent     # show / change which assistant answers
+npx @mockflow/mockflow-bridge reset     # clear saved state and start clean
+npx @mockflow/mockflow-bridge help      # all commands and options
 ```
 
 If you installed it with `npm i -g`, drop the `npx` and just type
 `mockflow-bridge`, `mockflow-bridge status`, and so on.
 
 To stop it, press `Ctrl + C` in the terminal window, or just close the window.
+
+## Starting over
+
+If something looks stuck or you want a clean slate:
+
+```bash
+npx @mockflow/mockflow-bridge reset          # agent choice, attachments, cached catalog, debug dumps
+npx @mockflow/mockflow-bridge reset --all    # the above plus the MCP token and paired boards
+```
+
+It lists what it will delete and asks before deleting anything (`--yes` skips
+the question). Plain `reset` keeps your MCP token and pairings, so your agent
+setup keeps working; `--all` means you have to re-run the `mcp add` line the
+bridge prints and pair your boards again.
 
 ## If something is not working
 
@@ -172,12 +198,21 @@ The token gates the endpoint. Without it any local process, including any web
 page you have open, could drive your board and read data from your connected
 sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 
-## Options and environment variables
+## Commands, options and environment variables
+
+| Command | What it does |
+| --- | --- |
+| `mockflow-bridge` | Start the daemon |
+| `mockflow-bridge status` | Running? which agent, which boards |
+| `mockflow-bridge agent [id\|pick\|clear]` | Show or change the local agent (live-switches a running bridge) |
+| `mockflow-bridge reset [--all] [--yes]` | Delete saved state in `~/.mockflow` |
+| `mockflow-bridge stdio` | stdio MCP shim to a running daemon |
+| `mockflow-bridge help` | All of the above |
 
 | Option | What it does |
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
-| `--agent <id>` | `claude`, `opencode`, `codex` or `cursor` |
+| `--agent <id>` | `claude`, `opencode`, `codex` or `cursor`, for this run only |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
 | `MFBRIDGE_WORKSPACE` | Same as `--workspace` |

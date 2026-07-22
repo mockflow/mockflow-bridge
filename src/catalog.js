@@ -101,6 +101,42 @@ async function load() {
 		+ 'bridge once to fetch and cache it, or set MFBRIDGE_CATALOG_URL to a reachable catalog.');
 }
 
+/**
+ * How to wire one agent CLI to this bridge, as the startup box prints it.
+ *
+ * Vendor CLI syntax churns (Codex grew `mcp add --url`, opencode has no add
+ * command at all), so a catalog may carry it and fix it for everyone without an
+ * npm publish:
+ *
+ *   registry.agentWiring = {
+ *     codex: { title: 'Add to Codex:', lines: ['codex mcp add mockflow --url {endpoint}'] }
+ *   }
+ *
+ * `{endpoint}` is substituted with the tokenized MCP URL. Anything missing,
+ * malformed or for an unknown agent falls back to the adapter's own
+ * mcpAddHint(), so an old cache or a catalog that says nothing still prints a
+ * working line.
+ */
+function wiringFor(registry, agent, endpoint) {
+	if (!agent) return null;
+	const entry = registry && registry.agentWiring && registry.agentWiring[agent.id];
+	const fromCatalog = normalizeWiring(entry, endpoint);
+	if (fromCatalog) return fromCatalog;
+	return agent.mcpAddHint ? normalizeWiring(agent.mcpAddHint(endpoint), endpoint) : null;
+}
+
+/** Accept only the { title, lines[] } shape, with the endpoint filled in. */
+function normalizeWiring(entry, endpoint) {
+	if (!entry || typeof entry !== 'object' || !Array.isArray(entry.lines)) return null;
+	const fill = function(s) { return String(s).split('{endpoint}').join(endpoint); };
+	const lines = entry.lines.filter(function(l) { return typeof l === 'string' && l; }).map(fill);
+	if (!lines.length) return null;
+	return {
+		title: typeof entry.title === 'string' && entry.title ? fill(entry.title) : 'Add to your agent:',
+		lines: lines
+	};
+}
+
 function warnIfEngineOld(registry) {
 	if (registry.minBridgeVersion && versionLessThan(config.ENGINE_VERSION, registry.minBridgeVersion)) {
 		log('WARNING: this catalog needs bridge >= ' + registry.minBridgeVersion
@@ -109,4 +145,4 @@ function warnIfEngineOld(registry) {
 	}
 }
 
-module.exports = { load: load };
+module.exports = { load: load, wiringFor: wiringFor };

@@ -67,6 +67,8 @@ module.exports = {
 	MCP_TOKEN_FILE: path.join(HOME_DIR, 'bridge-mcp-token'),
 	// Which local agent CLI the user picked when several are installed.
 	AGENT_FILE: path.join(HOME_DIR, 'bridge-agent'),
+	// Session-scoped chat attachments, one folder per board (agentManager.js).
+	ATTACHMENTS_DIR: path.join(HOME_DIR, 'attachments'),
 	CATALOG_CACHE_FILE: path.join(HOME_DIR, 'bridge-catalog-cache.js'),
 
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,

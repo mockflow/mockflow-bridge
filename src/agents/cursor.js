@@ -20,10 +20,10 @@
  *    for `restrictTools: 'none'`.
  */
 
-const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
 // Installed as `cursor-agent`; the docs' examples call it `agent`. Try both so
 // either install layout works.
@@ -86,7 +86,7 @@ module.exports = {
 		if (_available !== null) return _available;
 		for (let i = 0; i < CANDIDATES.length; i++) {
 			try {
-				const r = spawnSync(CANDIDATES[i], ['--version'], { encoding: 'utf8' });
+				const r = spawnCliSync(CANDIDATES[i], ['--version'], { encoding: 'utf8' });
 				if (r.status === 0) {
 					_binary = CANDIDATES[i];
 					_available = { available: true, version: (r.stdout || '').trim() };
@@ -101,6 +101,19 @@ module.exports = {
 	installHint() {
 		return 'Cursor CLI is not installed on this machine. Install it from '
 			+ 'https://cursor.com/cli, sign in once with `cursor-agent login`, then try again.';
+	},
+
+	/**
+	 * How to point this CLI at the bridge when the user drives it themselves in a
+	 * terminal. Cursor reads MCP servers from a JSON file, not a subcommand.
+	 * Fallback only: a catalog that carries `agentWiring.cursor` wins - see
+	 * src/catalog.js.
+	 */
+	mcpAddHint(endpoint) {
+		return {
+			title: 'Add to Cursor  (~/.cursor/mcp.json):',
+			lines: ['"mcpServers": { "mockflow": { "url": "' + endpoint + '" } }']
+		};
 	},
 
 	buildArgs(turn) {
@@ -126,7 +139,7 @@ module.exports = {
 	},
 
 	spawn(args, opts) {
-		return spawn(binary(), args, opts || {});
+		return spawnCli(binary(), args, opts);
 	},
 
 	/**

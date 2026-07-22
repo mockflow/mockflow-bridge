@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * MockFlow Bridge CLI.
+ * MockFlow Bridge CLI - thin dispatcher. Commands live in src/cli.js, the
+ * daemon in src/daemon.js.
  *
  *   mockflow-bridge            start the daemon (default)
- *   mockflow-bridge stdio      stdio MCP shim -> running daemon (for stdio-only clients)
- *   mockflow-bridge status     show daemon status + connected boards
+ *   mockflow-bridge status     daemon status + connected boards
+ *   mockflow-bridge agent      show / change which local agent CLI answers
+ *   mockflow-bridge reset      clear saved bridge state
+ *   mockflow-bridge stdio      stdio MCP shim -> running daemon
  *   mockflow-bridge help
  */
 
@@ -19,73 +22,38 @@ if (nodeMajor < 18) {
 	process.exit(1);
 }
 
-const config = require('../src/config');
-const paint = require('../src/ui').out;
+const argv = process.argv.slice(2);
+const cmd = argv[0] || 'start';
+const rest = argv.slice(1);
 
-const cmd = process.argv[2] || 'start';
+// A leading option (not a subcommand) means "start with these options".
+const isStart = cmd === 'start' || cmd.charAt(0) === '-';
 
-async function status() {
-	const endpoint = 'http://127.0.0.1:' + config.PORT + '/status';
-	try {
-		const resp = await fetch(endpoint);
-		const data = await resp.json();
-		console.log(paint.green('●') + ' ' + paint.bold('MockFlow Bridge') + ' is running on port ' + config.PORT);
-		console.log('  ' + paint.dim('version') + ' : ' + data.version);
-		console.log('  ' + paint.dim('catalog') + ' : ' + data.catalog + ' (' + data.tools + ' tools)');
-		if (data.boards && data.boards.length) {
-			console.log('  ' + paint.dim('boards') + '  :');
-			data.boards.forEach(function(b) {
-				console.log('    ' + paint.green('✓') + ' "' + (b.title || b.projectid) + '"'
-					+ (b.focused ? paint.teal(' (focused)') : ''));
-			});
-		} else {
-			console.log('  ' + paint.dim('boards') + '  : none connected - open a board and switch on "Connect local agent"');
-		}
-	} catch (e) {
-		console.log(paint.yellow('●') + ' ' + paint.bold('MockFlow Bridge') + ' is NOT running. Start it with: '
-			+ paint.teal('npx @mockflow/mockflow-bridge'));
-		process.exitCode = 1;
-	}
-}
-
-function help() {
-	console.log(paint.bold('MockFlow Bridge') + ' ' + config.ENGINE_VERSION);
-	console.log('');
-	console.log(paint.bold('Usage:'));
-	console.log('  ' + paint.teal('mockflow-bridge') + '           start the bridge daemon (leave it running)');
-	console.log('  ' + paint.teal('mockflow-bridge stdio') + '     stdio MCP shim for clients that cannot use HTTP');
-	console.log('  ' + paint.teal('mockflow-bridge status') + '    is the daemon running, which boards are connected');
-	console.log('');
-	console.log(paint.bold('Environment:'));
-	console.log('  ' + paint.teal('MFBRIDGE_PORT') + '             port (default ' + config.PORT + ')');
-	console.log('  ' + paint.teal('MFBRIDGE_CATALOG_URL') + '      catalog endpoint override');
-	console.log('  ' + paint.teal('MFBRIDGE_ALLOWED_ORIGINS') + '  extra comma-separated WS origins');
-	console.log('  ' + paint.teal('MFBRIDGE_DEV=1') + '            dev mode (allow any WS origin, e.g. file:// test pages)');
-	console.log('  ' + paint.teal('MFBRIDGE_AGENT') + '            local agent CLI to run turns on (same as --agent)');
-	console.log('');
-	console.log(paint.bold('Options:'));
-	console.log('  ' + paint.teal('--workspace <path>') + '        let the agent read one folder');
-	console.log('  ' + paint.teal('--agent <id>') + '              which installed agent CLI to use');
-}
-
-if (cmd === 'start' || cmd === '--workspace' || cmd === '--agent') {
-	// `mockflow-bridge [start] [--workspace <path>] [--agent <id>]`
-	var wsIdx = process.argv.indexOf('--workspace');
-	var workspace = wsIdx !== -1 ? process.argv[wsIdx + 1] : null;
-	var agIdx = process.argv.indexOf('--agent');
-	var agent = agIdx !== -1 ? process.argv[agIdx + 1] : (process.env.MFBRIDGE_AGENT || null);
+if (isStart && cmd !== '--help' && cmd !== '-h' && cmd !== '--version' && cmd !== '-v') {
+	var wsIdx = argv.indexOf('--workspace');
+	var workspace = wsIdx !== -1 ? argv[wsIdx + 1] : null;
+	var agIdx = argv.indexOf('--agent');
+	var agent = agIdx !== -1 ? argv[agIdx + 1] : (process.env.MFBRIDGE_AGENT || null);
 	require('../src/daemon').start({ workspace: workspace, agent: agent }).catch(function(err) {
 		console.error('Failed to start: ' + (err && err.message));
+		console.error('Run `mockflow-bridge help` for all commands.');
 		process.exit(1);
 	});
 } else if (cmd === 'stdio') {
 	require('../src/stdioProxy').start();
 } else if (cmd === 'status') {
-	status();
+	require('../src/cli').status();
+} else if (cmd === 'agent' || cmd === 'agents') {
+	require('../src/cli').agent(rest);
+} else if (cmd === 'reset') {
+	require('../src/cli').reset(rest);
 } else if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
-	help();
+	require('../src/cli').help();
+} else if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
+	console.log(require('../src/config').ENGINE_VERSION);
 } else {
 	console.error('Unknown command: ' + cmd);
-	help();
+	console.error('');
+	require('../src/cli').help();
 	process.exit(1);
 }

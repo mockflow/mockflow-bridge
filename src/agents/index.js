@@ -16,6 +16,10 @@
  *                    resume, systemPrompt, extraDirs }
  *   detect()       -> { available, version }
  *   installHint()  -> what to tell the user when it is missing
+ *   mcpAddHint(endpoint) -> { title, lines[] } shown at startup: how to point
+ *                    this CLI at the bridge by hand. Optional, and only a
+ *                    fallback - a catalog `agentWiring.<id>` overrides it
+ *                    (src/catalog.js), so vendor syntax changes need no publish.
  *   buildArgs(turn)-> { args, env }   turn: { prompt, systemPrompt, allowedTools,
  *                                             resume, extraDirs[], partialMessages }
  *   spawn(args, opts) -> ChildProcess
