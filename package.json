@@ -1,6 +1,6 @@
 {
 	"name": "@mockflow/mockflow-bridge",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"publishConfig": {
 		"access": "public"
 	},
@@ -33,7 +33,7 @@
 		"bridge"
 	],
 	"author": "A Produle Systems Pvt Ltd",
-	"license": "ISC",
+	"license": "MIT",
 	"dependencies": {
 		"ws": "^8.18.0"
 	}
