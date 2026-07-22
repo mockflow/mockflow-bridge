@@ -26,7 +26,11 @@ const INSTRUCTIONS =
 	+ 'component list (each item carrying a self-contained brief) and STOP - the user '
 	+ 'confirms the list on their board and the chosen items are generated and arranged '
 	+ 'automatically, without you. Use read_board to see what is already on the board, '
-	+ 'and list_boards / select_board when several boards are connected.';
+	+ 'and list_boards / select_board when several boards are connected. When the user '
+	+ 'refers to their own content ("my doc", "my issues", "my tickets"), call '
+	+ 'list_source_tools first: they may have connected Notion, Jira, Slack or GitHub '
+	+ 'to MockFlow, and you can search and fetch that content through the source tools '
+	+ 'rather than answering from memory.';
 
 const BRIDGE_TOOLS = [
 	{
@@ -53,6 +57,39 @@ const BRIDGE_TOOLS = [
 			properties: {
 				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
 			}
+		}
+	},
+	// Connected sources (Notion, Jira, Slack, ...). The user applies a source in
+	// their MockFlow tab; these tools reach it through that tab, because the
+	// OAuth credentials live in the user's MockFlow account and never on this
+	// machine. Deliberately generic: the tool list comes from MockFlow at call
+	// time, so connecting a new app never needs a bridge update.
+	{
+		name: 'list_source_tools',
+		description: 'List the tools available for the connected data sources the user applied to this request (Notion, Jira, Slack, GitHub, ...). Call this FIRST whenever the user refers to their own content ("my doc", "my issues", "my tickets") - it tells you what you can search and fetch. Returns tool names with one-line descriptions; use describe_source_tool for a schema and call_source_tool to run one.',
+		inputSchema: { type: 'object', properties: {} }
+	},
+	{
+		name: 'describe_source_tool',
+		description: 'Get the full input schema for one source tool returned by list_source_tools, so you can build valid arguments for call_source_tool.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				tool: { type: 'string', description: 'Tool name exactly as returned by list_source_tools' }
+			},
+			required: ['tool']
+		}
+	},
+	{
+		name: 'call_source_tool',
+		description: 'Run one source tool against the user\'s connected account and return its raw result. Search or list first to find the right item, then fetch its details. Render ONLY what comes back: pass the fetched content verbatim into whatever render_* tool you use, because the render tools cannot see this result. If nothing relevant comes back, tell the user what you searched for instead of generating from your own knowledge.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				tool: { type: 'string', description: 'Tool name exactly as returned by list_source_tools' },
+				args: { type: 'object', description: 'Arguments matching the schema from describe_source_tool' }
+			},
+			required: ['tool']
 		}
 	}
 ];
@@ -124,6 +161,23 @@ class McpEndpoint {
 					const data = await this.hub.runOnBoard(args.projectid || null,
 						{ t: 'read', what: 'board' }, config.READ_TIMEOUT_MS);
 					return this._ok(JSON.stringify(data));
+				}
+
+				// Source tools. The tab knows which sources the user applied and
+				// forwards to MockFlow; a source the user did not apply is refused
+				// there, so this side stays a dumb relay.
+				case 'list_source_tools':
+				case 'describe_source_tool':
+				case 'call_source_tool': {
+					const op = name === 'list_source_tools' ? 'list'
+						: (name === 'describe_source_tool' ? 'describe' : 'call');
+					if (op !== 'list' && !args.tool) {
+						return this._err('"tool" is required - use list_source_tools to see the available tool names.');
+					}
+					const data = await this.hub.runOnBoard(args.projectid || null,
+						{ t: 'source', op: op, tool: args.tool || '', args: args.args || {} },
+						config.SOURCE_TIMEOUT_MS || config.TOOL_TIMEOUT_MS);
+					return this._ok(typeof data === 'string' ? data : JSON.stringify(data));
 				}
 
 				case 'layout_board': {

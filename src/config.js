@@ -75,6 +75,11 @@ module.exports = {
 	// so these calls legitimately take far longer than a plain draw.
 	HTML_TOOL_TIMEOUT_MS: 180000,
 	READ_TIMEOUT_MS: 20000,
+	// Connected-source calls (list_source_tools / call_source_tool): the tab
+	// relays to MockFlow, which runs the third-party API call (Notion, Jira,
+	// Composio), so these are slower than a board read but never as slow as a
+	// full HTML render.
+	SOURCE_TIMEOUT_MS: 120000,
 	PAIR_TIMEOUT_MS: 5 * 60 * 1000,
 	// plan_board batches: a plan that is not completed within this window is
 	// discarded (the agent likely gave up), so stale plans never re-arrange a
