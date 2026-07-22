@@ -1,6 +1,9 @@
 {
-	"name": "mockflow-bridge",
+	"name": "@mockflow/mockflow-bridge",
 	"version": "0.1.2",
+	"publishConfig": {
+		"access": "public"
+	},
 	"description": "Connects any AI agent (Claude Code, Cursor, Codex, Ollama...) to a live MockFlow board open in the browser. The agent is the brain, the browser tab is the hands, the bridge is the nervous system between them.",
 	"bin": {
 		"mockflow-bridge": "bin/mockflow-bridge.js"

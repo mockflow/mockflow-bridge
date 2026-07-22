@@ -220,7 +220,7 @@ async function start(opts) {
 			'Mida cannot read any files on this computer. To let it read one',
 			'folder (e.g. a repo to brainstorm or diagram), restart with:',
 			'',
-			'  ' + paint.teal('npx mockflow-bridge --workspace <path-to-folder>'),
+			'  ' + paint.teal('npx @mockflow/mockflow-bridge --workspace <path-to-folder>'),
 			'',
 			paint.dim('Files are only read locally. Nothing is ever uploaded to MockFlow.')
 		], paint.yellow, paint));
@@ -228,7 +228,7 @@ async function start(opts) {
 	console.error('');
 	console.error('  ' + paint.bold('Add to Claude Code:'));
 	console.error('    ' + paint.teal('claude mcp add --transport http -s user mockflow ' + endpoint + '/mcp/' + mcpToken));
-	console.error('  ' + paint.dim('Or for stdio-only clients:  command: npx mockflow-bridge stdio'));
+	console.error('  ' + paint.dim('Or for stdio-only clients:  command: npx @mockflow/mockflow-bridge stdio'));
 	console.error('');
 
 	function shutdown() {

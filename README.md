@@ -56,17 +56,17 @@ You have two ways to run it. Both are fine, pick one.
 each time:
 
 ```bash
-npx mockflow-bridge
+npx @mockflow/mockflow-bridge
 ```
 
 **Option B: install it once.** Then the command is shorter every time after:
 
 ```bash
-npm i -g mockflow-bridge     # once
+npm i -g @mockflow/mockflow-bridge     # once
 mockflow-bridge              # every time you want to start it
 ```
 
-To update an installed copy later, run `npm i -g mockflow-bridge` again.
+To update an installed copy later, run `npm i -g @mockflow/mockflow-bridge` again.
 
 Leave this window open. It stays running and shows a **pairing code** that looks
 like `941-027`. If you close the window, the connection stops.
@@ -97,7 +97,7 @@ By default the AI cannot see any of your files. If you want it to read a
 folder, start the bridge like this instead:
 
 ```bash
-npx mockflow-bridge --workspace ~/Documents/my-project
+npx @mockflow/mockflow-bridge --workspace ~/Documents/my-project
 ```
 
 Replace the path with the folder you want it to read. Now you can ask:
@@ -114,10 +114,10 @@ The first time you start the bridge with several installed, it asks which one
 to use and remembers your answer. To change it later:
 
 ```bash
-npx mockflow-bridge --agent claude
-npx mockflow-bridge --agent opencode
-npx mockflow-bridge --agent codex
-npx mockflow-bridge --agent cursor
+npx @mockflow/mockflow-bridge --agent claude
+npx @mockflow/mockflow-bridge --agent opencode
+npx @mockflow/mockflow-bridge --agent codex
+npx @mockflow/mockflow-bridge --agent cursor
 ```
 
 They differ in small ways (web search, attachments, reading your files). See
@@ -126,9 +126,9 @@ They differ in small ways (web search, attachments, reading your files). See
 ## Everyday commands
 
 ```bash
-npx mockflow-bridge           # start it (leave the window open)
-npx mockflow-bridge status    # is it running, which boards are connected
-npx mockflow-bridge help      # all options
+npx @mockflow/mockflow-bridge           # start it (leave the window open)
+npx @mockflow/mockflow-bridge status    # is it running, which boards are connected
+npx @mockflow/mockflow-bridge help      # all options
 ```
 
 If you installed it with `npm i -g`, drop the `npx` and just type
@@ -166,7 +166,7 @@ codex mcp add mockflow --url http://127.0.0.1:21196/mcp/<token>
 gemini mcp add -t http -s user mockflow http://127.0.0.1:21196/mcp/<token>
 ```
 
-Clients that only speak stdio use `npx mockflow-bridge stdio` as the command.
+Clients that only speak stdio use `npx @mockflow/mockflow-bridge stdio` as the command.
 
 The token gates the endpoint. Without it any local process, including any web
 page you have open, could drive your board and read data from your connected

@@ -105,7 +105,7 @@ function warnIfEngineOld(registry) {
 	if (registry.minBridgeVersion && versionLessThan(config.ENGINE_VERSION, registry.minBridgeVersion)) {
 		log('WARNING: this catalog needs bridge >= ' + registry.minBridgeVersion
 			+ ' but you are running ' + config.ENGINE_VERSION
-			+ '. Some tools may not work - update with: npm i -g mockflow-bridge');
+			+ '. Some tools may not work - update with: npm i -g @mockflow/mockflow-bridge');
 	}
 }
 

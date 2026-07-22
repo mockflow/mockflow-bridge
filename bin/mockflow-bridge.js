@@ -43,7 +43,7 @@ async function status() {
 		}
 	} catch (e) {
 		console.log(paint.yellow('●') + ' ' + paint.bold('MockFlow Bridge') + ' is NOT running. Start it with: '
-			+ paint.teal('npx mockflow-bridge'));
+			+ paint.teal('npx @mockflow/mockflow-bridge'));
 		process.exitCode = 1;
 	}
 }

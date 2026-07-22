@@ -138,6 +138,6 @@ ws.on('close', function() {
 });
 
 ws.on('error', function(err) {
-	console.error('[fake-tab] ' + err.message + ' - is the daemon running? (npx mockflow-bridge)');
+	console.error('[fake-tab] ' + err.message + ' - is the daemon running? (npx @mockflow/mockflow-bridge)');
 	process.exit(1);
 });
