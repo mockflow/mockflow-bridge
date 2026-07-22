@@ -404,3 +404,8 @@ class McpEndpoint {
 }
 
 module.exports = McpEndpoint;
+// The tools the BRIDGE adds on top of the catalog's render tools. Exported
+// because a per-turn allowlist has to cover exactly what tools/list serves:
+// leaving modify_component and read_board out of it means the agent cannot edit
+// what is already on the board and re-renders instead, silently duplicating it.
+module.exports.BRIDGE_TOOL_NAMES = BRIDGE_TOOLS.map(function(t) { return t.name; });

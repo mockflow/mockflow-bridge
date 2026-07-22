@@ -77,7 +77,9 @@ const RESEARCH_GUIDANCE =
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
  */
 function toolStepLabel(toolName) {
-	return String(toolName || 'tool').replace(/^mcp__mockflow__/, '')
+	// Each CLI prefixes MCP tools its own way: mcp__mockflow__render_flowchart
+	// (Claude Code), mockflow_render_flowchart (opencode), bare (Codex).
+	return String(toolName || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
 		.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
 }
 
@@ -259,7 +261,7 @@ class AgentManager {
 	 * list changes and needs no list of tool names of its own.
 	 */
 	_isRunnableTool(toolName, allowedTools) {
-		return this.agent.isRunnableTool(toolName, allowedTools);
+		return this.agent.isRunnableTool(toolName, allowedTools, this._mockflowToolNames());
 	}
 
 	detect() {
@@ -317,6 +319,28 @@ class AgentManager {
 			if (names.length) parts.push(tools[i] + ' takes: ' + names.join(', '));
 		}
 		return parts.length ? parts.join('. ') + '.' : '';
+	}
+
+	/**
+	 * Every board tool the catalog defines, by bare MCP name. An adapter whose
+	 * CLI matches allowlist entries literally (opencode) cannot expand
+	 * `mcp__mockflow__*` on its own, and guessing the list in the adapter would
+	 * put catalog knowledge in the wrong place.
+	 */
+	_mockflowToolNames() {
+		if (this._toolNames) return this._toolNames;
+		const names = [];
+		(this.registry || []).forEach(function(e) {
+			if (e && e.mcpToolName) names.push(e.mcpToolName);
+		});
+		// Same set the MCP endpoint serves from tools/list: catalog render tools
+		// PLUS the bridge's own (read_board, modify_component, select_board...).
+		// Miss those and an agent that matches the allowlist literally can only
+		// draw, so "change the flowchart" duplicates it instead of editing it.
+		const bridgeTools = require('./mcpEndpoint').BRIDGE_TOOL_NAMES || [];
+		bridgeTools.forEach(function(n) { if (names.indexOf(n) === -1) names.push(n); });
+		this._toolNames = names;
+		return names;
 	}
 
 	_allowedTools() {
@@ -407,6 +431,7 @@ class AgentManager {
 			prompt: turnText,
 			systemPrompt: systemPrompt,
 			allowedTools: allowedTools,
+			mockflowTools: this._mockflowToolNames(),
 			extraDirs: attachDir ? [attachDir] : [],
 			resume: canResume ? session.sessionId : null,
 			partialMessages: true
@@ -687,6 +712,7 @@ class AgentManager {
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
+			mockflowTools: this._mockflowToolNames(),
 			partialMessages: false
 		});
 
@@ -726,7 +752,8 @@ class AgentManager {
 					if (ev.id && openSteps[ev.id]) continue;
 					var stepId = 'cg_' + turnId + '_' + (stepCounter++);
 					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
-					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__/, '').replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
+							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
 					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
 				} else if (ev.type === 'tool-end') {
 					var open = openSteps[ev.id];
@@ -859,6 +886,7 @@ class AgentManager {
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
+			mockflowTools: this._mockflowToolNames(),
 			partialMessages: true
 		});
 

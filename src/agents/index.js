@@ -21,9 +21,12 @@
  *                    fallback - a catalog `agentWiring.<id>` overrides it
  *                    (src/catalog.js), so vendor syntax changes need no publish.
  *   buildArgs(turn)-> { args, env }   turn: { prompt, systemPrompt, allowedTools,
- *                                             resume, extraDirs[], partialMessages }
+ *                                             resume, extraDirs[], partialMessages,
+ *                                             mockflowTools[] - every board tool the
+ *                                             catalog defines, for a CLI that cannot
+ *                                             expand mcp__mockflow__* itself }
  *   spawn(args, opts) -> ChildProcess
- *   isRunnableTool(name, allowedTools) -> boolean
+ *   isRunnableTool(name, allowedTools, mockflowTools) -> boolean
  *   parseLine(line) -> [ {type:'session',id} | {type:'text',text}
  *                      | {type:'tool-start',id,name} | {type:'tool-end',id,ok} ]
  *
@@ -44,13 +47,14 @@ const config = require('../config');
 
 // Only CLIs whose every flow has been exercised end to end against a real board
 // belong here. An adapter written from a vendor's documentation looks finished
-// and is not: the opencode one parsed an event schema that CLI never emits and
-// exposed no board tools at all, and nothing said so until a live turn ran.
-// Add the module back (git history has both) once chat, a resumed turn and a
-// component turn have all been seen working.
+// and is not: the first opencode one parsed an event schema that CLI never
+// emits and exposed no board tools at all, and nothing said so until a live
+// turn ran. Add a new one only after chat, a resumed turn and a component turn
+// have each been seen drawing on a real board (test/fake-*.js).
 const AGENTS = [
 	require('./claude'),
-	require('./codex')
+	require('./codex'),
+	require('./opencode')
 ];
 
 function byId(id) {

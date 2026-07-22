@@ -31,14 +31,15 @@ node --version
 
 You should see a number like `v20.11.0`. Anything 18 or higher is fine.
 
-**2. One AI assistant app.** The bridge works with either of these. Pick the
-one you already pay for, or Claude Code if you have none. For the differences
+**2. One AI assistant app.** The bridge works with any of these. Pick the one
+you already pay for, or Claude Code if you have none. For the differences
 between them, see [AGENT-COMPARISON.md](AGENT-COMPARISON.md).
 
 | Assistant | Install it with | Then sign in with |
 | --- | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude` |
 | Codex | `npm i -g @openai/codex` | `codex login` |
+| opencode | see [opencode.ai](https://opencode.ai) | `opencode` |
 
 Run the install command in your terminal, then run the sign-in command once and
 follow the prompts. You only do this the first time.
@@ -164,7 +165,7 @@ bridge prints and pair your boards again.
 
 | What you see | What to do |
 | --- | --- |
-| "no supported agent CLI found" | Install one of the two assistants above and sign in once. |
+| "no supported agent CLI found" | Install one of the assistants above and sign in once. |
 | The pairing code is not accepted | Codes change each time the bridge restarts. Use the one currently shown in your terminal. |
 | The button will not turn green | Check the terminal window is still open and shows the bridge running. |
 | "Port 21196 is in use" | Another bridge is already running. Close that terminal window and try again. |
@@ -210,7 +211,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | Option | What it does |
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
-| `--agent <id>` | `claude` or `codex`, for this run only |
+| `--agent <id>` | `claude`, `codex` or `opencode`, for this run only |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
 | `MFBRIDGE_WORKSPACE` | Same as `--workspace` |
@@ -223,7 +224,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 ## How it works
 
 ```
-Claude Code / Codex                   (the brain: generates component JSON)
+Claude Code / Codex / opencode        (the brain: generates component JSON)
         | MCP  (POST /mcp/<token>, or the stdio shim)
         v
 mockflow-bridge daemon                (engine: validate, map args -> gdata)
