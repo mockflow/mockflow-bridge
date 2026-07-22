@@ -32,13 +32,15 @@ node --version
 You should see a number like `v20.11.0`. Anything 18 or higher is fine.
 
 **2. One AI assistant app.** The bridge works with any of these. Pick the one
-you already pay for, or Claude Code if you have none.
+you already pay for, or Claude Code if you have none. If you want to compare
+them first, see [AGENT-COMPARISON.md](AGENT-COMPARISON.md).
 
 | Assistant | Install it with | Then sign in with |
 | --- | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude` |
 | opencode | see [opencode.ai](https://opencode.ai) | `opencode` |
 | Codex | `npm i -g @openai/codex` | `codex login` |
+| Cursor CLI | see [cursor.com/cli](https://cursor.com/cli) | `cursor-agent login` |
 
 Run the install command in your terminal, then run the sign-in command once and
 follow the prompts. You only do this the first time.
@@ -115,7 +117,11 @@ to use and remembers your answer. To change it later:
 npx mockflow-bridge --agent claude
 npx mockflow-bridge --agent opencode
 npx mockflow-bridge --agent codex
+npx mockflow-bridge --agent cursor
 ```
+
+They differ in small ways (web search, attachments, reading your files). See
+[AGENT-COMPARISON.md](AGENT-COMPARISON.md).
 
 ## Everyday commands
 
@@ -171,7 +177,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | Option | What it does |
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
-| `--agent <id>` | `claude`, `opencode` or `codex` |
+| `--agent <id>` | `claude`, `opencode`, `codex` or `cursor` |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
 | `MFBRIDGE_WORKSPACE` | Same as `--workspace` |
@@ -184,7 +190,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 ## How it works
 
 ```
-Claude Code / opencode / Codex        (the brain: generates component JSON)
+Claude Code / opencode / Codex / Cursor   (the brain: generates component JSON)
         | MCP  (POST /mcp/<token>, or the stdio shim)
         v
 mockflow-bridge daemon                (engine: validate, map args -> gdata)

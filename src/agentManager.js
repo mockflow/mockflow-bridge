@@ -350,6 +350,7 @@ class AgentManager {
 		// conversation because the prompt is self-contained).
 		const canResume = this.agent.capabilities.resume === 'by-id';
 		const spec = this.agent.buildArgs({
+			cwd: this.workspace,
 			prompt: turnText,
 			systemPrompt: systemPrompt,
 			allowedTools: allowedTools,
@@ -603,6 +604,7 @@ class AgentManager {
 		}
 
 		const spec = this.agent.buildArgs({
+			cwd: this.workspace,
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
@@ -770,6 +772,7 @@ class AgentManager {
 		// writing it, so the step row appears immediately instead of after thousands
 		// of characters of HTML have streamed out (same reason the chat turn uses it).
 		const spec = this.agent.buildArgs({
+			cwd: this.workspace,
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,

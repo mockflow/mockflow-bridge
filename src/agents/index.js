@@ -41,7 +41,8 @@ const config = require('../config');
 const AGENTS = [
 	require('./claude'),
 	require('./opencode'),
-	require('./codex')
+	require('./codex'),
+	require('./cursor')
 ];
 
 function byId(id) {
