@@ -60,6 +60,11 @@ module.exports = {
 	DEBUG_DIR: path.join(HOME_DIR, 'bridge-debug'),
 	PORT_FILE: path.join(HOME_DIR, 'bridge-port'),
 	TOKENS_FILE: path.join(HOME_DIR, 'bridge-tokens.json'),
+	// Secret in the MCP endpoint path. The endpoint is plain local HTTP with no
+	// other authentication, so without it any process - including any web page
+	// the user has open, via a cross-origin POST - could drive the board tools
+	// and now read the user's connected sources through them.
+	MCP_TOKEN_FILE: path.join(HOME_DIR, 'bridge-mcp-token'),
 	CATALOG_CACHE_FILE: path.join(HOME_DIR, 'bridge-catalog-cache.js'),
 
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,
@@ -80,6 +85,9 @@ module.exports = {
 	// Composio), so these are slower than a board read but never as slow as a
 	// full HTML render.
 	SOURCE_TIMEOUT_MS: 120000,
+	// Ceiling for one attached file written to disk (the tab sends it base64 over
+	// the local socket). Nothing is uploaded, so the useful limit is disk safety.
+	MAX_ATTACHMENT_BYTES: 40 * 1024 * 1024,
 	PAIR_TIMEOUT_MS: 5 * 60 * 1000,
 	// plan_board batches: a plan that is not completed within this window is
 	// discarded (the agent likely gave up), so stale plans never re-arrange a

@@ -22,9 +22,21 @@ function discoverPort() {
 	}
 }
 
+/** The daemon's MCP token, written to ~/.mockflow on its first run. Both live on
+ *  this machine under the same user, so reading the file is the whole handshake. */
+function discoverToken() {
+	if (process.env.MFBRIDGE_MCP_TOKEN) return process.env.MFBRIDGE_MCP_TOKEN.trim();
+	try {
+		return fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim();
+	} catch (e) {
+		return '';
+	}
+}
+
 function start() {
 	const port = discoverPort();
-	const endpoint = 'http://127.0.0.1:' + port + '/mcp';
+	const token = discoverToken();
+	const endpoint = 'http://127.0.0.1:' + port + '/mcp/' + token;
 
 	const rl = readline.createInterface({ input: process.stdin, terminal: false });
 

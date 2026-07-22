@@ -2,7 +2,9 @@
  * MockFlow Bridge - daemon.
  *
  * One long-running localhost process with two faces:
- *   POST /mcp    JSON-RPC MCP endpoint for agents (Claude Code, Cursor, ...)
+ *   POST /mcp/<token>  JSON-RPC MCP endpoint for agents (Claude Code, Cursor, ...)
+ *                     token-gated: the endpoint has no other auth and browsers
+ *                     can reach localhost, so the secret is the door
  *   WS   /board  live editor tabs (pairing + tool execution), see boardHub.js
  *   GET  /status health + connected boards
  *
@@ -11,6 +13,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const config = require('./config');
 const log = require('./log');
@@ -63,16 +66,29 @@ async function start(opts) {
 		debug: config.DEBUG
 	};
 
+	// Secret path segment for the MCP endpoint. Local HTTP has no other
+	// authentication, and browsers can POST cross-origin to localhost, so without
+	// this any page the user visits could drive the board tools and read their
+	// connected sources through them. Persisted so the agent's saved MCP config
+	// keeps working across restarts.
+	const mcpToken = loadOrCreateMcpToken();
+
 	const server = http.createServer(function(req, res) {
 		const url = (req.url || '').split('?')[0];
 
 		if (req.method === 'OPTIONS') {
-			cors(res);
-			res.writeHead(204);
+			// Preflight is answered for the status route only. /mcp is not a browser
+			// endpoint and must not be reachable cross-origin.
+			if (url === '/' || url === '/status') {
+				cors(res);
+				res.writeHead(204);
+				return res.end();
+			}
+			res.writeHead(404);
 			return res.end();
 		}
 
-		if (req.method === 'GET' && (url === '/' || url === '/status' || url === '/mcp')) {
+		if (req.method === 'GET' && (url === '/' || url === '/status')) {
 			cors(res);
 			res.writeHead(200, { 'Content-Type': 'application/json' });
 			return res.end(JSON.stringify({
@@ -85,7 +101,10 @@ async function start(opts) {
 			}));
 		}
 
-		if (req.method === 'POST' && url === '/mcp') {
+		// MCP clients are local processes, so this route deliberately sends NO CORS
+		// headers: a browser must not be able to read its responses even if it
+		// somehow learns the token.
+		if (req.method === 'POST' && url === '/mcp/' + mcpToken) {
 			var body = '';
 			req.on('data', function(c) {
 				body += c;
@@ -155,7 +174,7 @@ async function start(opts) {
 	console.error(ui.banner(config.ENGINE_VERSION, paint));
 	console.error('');
 	console.error(ui.infoBox([
-		['MCP endpoint', endpoint + '/mcp'],
+		['MCP endpoint', endpoint + '/mcp/' + mcpToken],
 		['Board socket', 'ws://' + config.HOST + ':' + config.PORT + '/board'],
 		['Catalog', loaded.source + ' (' + loaded.registry.length + ' tools)'],
 		['Local agent', agents.detect()
@@ -194,7 +213,7 @@ async function start(opts) {
 	}
 	console.error('');
 	console.error('  ' + paint.bold('Add to Claude Code:'));
-	console.error('    ' + paint.teal('claude mcp add --transport http -s user mockflow ' + endpoint + '/mcp'));
+	console.error('    ' + paint.teal('claude mcp add --transport http -s user mockflow ' + endpoint + '/mcp/' + mcpToken));
 	console.error('  ' + paint.dim('Or for stdio-only clients:  command: npx mockflow-bridge stdio'));
 	console.error('');
 
@@ -261,6 +280,20 @@ function cors(res) {
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers',
 		'Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
+}
+
+/** Read the persisted MCP token, creating one on first run. */
+function loadOrCreateMcpToken() {
+	try {
+		const existing = fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim();
+		if (existing) return existing;
+	} catch (e) {}
+	const token = crypto.randomBytes(24).toString('hex');
+	try {
+		fs.mkdirSync(config.HOME_DIR, { recursive: true });
+		fs.writeFileSync(config.MCP_TOKEN_FILE, token, { mode: 0o600 });
+	} catch (e) {}
+	return token;
 }
 
 function sendRpc(res, id, result, error) {

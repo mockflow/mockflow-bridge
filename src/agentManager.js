@@ -36,6 +36,9 @@ const PERSONA =
 	+ 'self-contained brief) and stop - the user confirms the list on the board and the '
 	+ 'chosen items are generated and arranged automatically, without you. After calling '
 	+ 'plan_board just tell the user to review the list and click Generate Board. '
+	+ 'When the user asks to change, refine, add to or fix something that is already on the '
+	+ 'board, call modify_component with that component id (read_board lists the ids and labels) '
+	+ 'instead of rendering it again - a second render duplicates it rather than replacing it. '
 	+ 'Your text replies show in a small chat bubble: keep them short, friendly and plain. '
 	+ 'Never output URLs, file paths or markdown links, and never tell the user to open '
 	+ 'anything - what you draw is already on their board. Never use em dashes or en '
@@ -201,15 +204,33 @@ class AgentManager {
 		const target = path.join(dir, safeName);
 		if (path.relative(dir, target).startsWith('..')) throw new Error('Invalid file name');
 
-		fs.writeFileSync(target, Buffer.from(String(attachment.data || ''), 'base64'));
+		// Ceiling on what a frame may write to the user's disk. Generous, because
+		// nothing is uploaded here and the agent reads big files incrementally
+		// rather than swallowing them whole - this is a guard against a runaway or
+		// hostile frame, not a limit on useful documents.
+		const bytes = Buffer.from(String(attachment.data || ''), 'base64');
+		if (bytes.length > config.MAX_ATTACHMENT_BYTES) {
+			throw new Error('That file is ' + Math.round(bytes.length / (1024 * 1024)) + 'MB, over the '
+				+ Math.round(config.MAX_ATTACHMENT_BYTES / (1024 * 1024)) + 'MB limit for attachments.');
+		}
+		fs.writeFileSync(target, bytes);
 		this.log('Saved attachment for board "' + key + '": ' + target);
 		return target;
 	}
 
 	/** How the agent is told about the file it can now read. */
 	_attachmentPrompt(filePath, kind) {
-		const head = 'The user attached a file. It is saved on this machine at: ' + filePath
+		let head = 'The user attached a file. It is saved on this machine at: ' + filePath
 			+ '\nRead it before answering - do not ask the user to paste its contents.';
+		// Large files: read in parts and work from a condensed understanding, rather
+		// than trying to hold the whole thing or giving up on it.
+		try {
+			const mb = fs.statSync(filePath).size / (1024 * 1024);
+			if (mb >= 2) {
+				head += '\nIt is a large file (' + mb.toFixed(1) + 'MB): read it in sections, keep a running'
+					+ ' summary of what matters for the request, and work from that rather than from the raw text.';
+			}
+		} catch (e) {}
 		if (kind === 'whiteboard') {
 			return head + '\nIt is a photo of a whiteboard or a hand-drawn sketch. Transcribe what is actually'
 				+ ' written and drawn on it, keeping the author\'s own wording and grouping, then render that'
@@ -265,10 +286,16 @@ class AgentManager {
 		return this.available;
 	}
 
+	/** Token the daemon persisted for its MCP endpoint (see daemon.js). */
+	_mcpToken() {
+		try { return fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim(); }
+		catch (e) { return ''; }
+	}
+
 	_mcpConfigPath() {
 		const cfg = {
 			mcpServers: {
-				mockflow: { type: 'http', url: 'http://127.0.0.1:' + config.PORT + '/mcp' }
+				mockflow: { type: 'http', url: 'http://127.0.0.1:' + config.PORT + '/mcp/' + this._mcpToken() }
 			}
 		};
 		const p = path.join(config.HOME_DIR, 'bridge-agent-mcp.json');
@@ -302,7 +329,13 @@ class AgentManager {
 		const self = this;
 		const turnId = frame.id;
 		const text = String(frame.text || '').trim();
-		const key = tab.projectid || tab.id;
+		// Conversation memory is per SURFACE, not per board: Ask Mida and each
+		// Concept Builder on the same board are separate conversations with
+		// different personas, and one shared session would blend them into a
+		// single history. The tab names its surface; older frames without one
+		// keep the board-level key.
+		const boardKey = tab.projectid || tab.id;
+		const key = frame.surface ? boardKey + '::' + frame.surface : boardKey;
 
 		if (!text) {
 			return sendToTab({ t: 'chat-done', id: turnId, ok: false, error: 'Empty message' });
@@ -348,7 +381,7 @@ class AgentManager {
 		var turnText = text;
 		if (frame.attachment) {
 			try {
-				const saved = this._saveAttachment(key, frame.attachment);
+				const saved = this._saveAttachment(boardKey, frame.attachment);
 				turnText = this._attachmentPrompt(saved, frame.attachment.kind) + '\n\n' + text;
 			} catch (e) {
 				this.log('Could not save attachment:', e && e.message);
@@ -370,7 +403,7 @@ class AgentManager {
 		];
 		// Attachments live outside the workspace (and there may be no workspace at
 		// all), so the agent needs that one folder added to its readable set.
-		const attachDir = this.attachDirs.get(key);
+		const attachDir = this.attachDirs.get(boardKey);
 		if (attachDir) args.push('--add-dir', attachDir);
 		if (session.sessionId) args.push('--resume', session.sessionId);
 
@@ -505,10 +538,15 @@ class AgentManager {
 		});
 	}
 
+	/** Stop whatever this board is running. Sessions are per surface, so a
+	 *  cancel from a tab kills every surface that belongs to that board. */
 	cancel(tab) {
-		const key = tab.projectid || tab.id;
-		const session = this.sessions.get(key);
-		if (session && session.proc) killProcTree(session.proc);
+		const boardKey = tab.projectid || tab.id;
+		const self = this;
+		this.sessions.forEach(function(session, key) {
+			if (key !== boardKey && key.indexOf(boardKey + '::') !== 0) return;
+			if (session && session.proc) killProcTree(session.proc);
+		});
 	}
 
 	/**

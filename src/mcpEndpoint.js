@@ -16,6 +16,14 @@ const debug = require('./debug');
 
 const PROTOCOL_VERSION = '2025-03-26';
 
+// Appended to every successful draw. Without it an agent that still has the
+// component's data in its own context happily re-renders the whole thing to add
+// one branch, which draws a SECOND component instead of editing the first.
+const FOLLOWUP_HINT =
+	' If the user later asks to change what you just rendered, do NOT render it again:'
+	+ ' call read_board for its id and then modify_component. Re-rendering leaves the'
+	+ ' original on the board and creates a duplicate.';
+
 const INSTRUCTIONS =
 	'MockFlow Bridge draws visualizations LIVE onto the MockFlow board the user has '
 	+ 'open in their browser. Use the render_* tools whenever the user asks to create, '
@@ -30,7 +38,10 @@ const INSTRUCTIONS =
 	+ 'refers to their own content ("my doc", "my issues", "my tickets"), call '
 	+ 'list_source_tools first: they may have connected Notion, Jira, Slack or GitHub '
 	+ 'to MockFlow, and you can search and fetch that content through the source tools '
-	+ 'rather than answering from memory.';
+	+ 'rather than answering from memory. '
+	+ 'Changing something that is ALREADY on the board is modify_component, never a second '
+	+ 'render: read_board gives you each component id, its label and whether it can be edited. '
+	+ 'Re-rendering a component you drew earlier does not replace it, it duplicates it.';
 
 const BRIDGE_TOOLS = [
 	{
@@ -57,6 +68,18 @@ const BRIDGE_TOOLS = [
 			properties: {
 				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
 			}
+		}
+	},
+	{
+		name: 'modify_component',
+		description: 'Change a component that is ALREADY on the board, in place, instead of drawing a new one. Use this whenever the user asks to refine, update, add to, fix or change something that exists - read_board gives you the component ids. Pass what should change in plain language; the component keeps its position, size and identity.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				componentId: { type: 'string', description: 'The component id (cid) from read_board' },
+				instruction: { type: 'string', description: 'What to change, in plain language (e.g. "add a Blocked column", "rename the third task to Ship beta")' }
+			},
+			required: ['componentId', 'instruction']
 		}
 	},
 	// Connected sources (Notion, Jira, Slack, ...). The user applies a source in
@@ -163,6 +186,18 @@ class McpEndpoint {
 					return this._ok(JSON.stringify(data));
 				}
 
+				case 'modify_component': {
+					if (!args.componentId || !args.instruction) {
+						return this._err('modify_component needs both componentId (from read_board) and instruction.');
+					}
+					// The tab owns the component's current data, so it builds the modify
+					// prompt and runs the edit; this only carries the request.
+					const res = await this.hub.runOnBoard(args.projectid || null,
+						{ t: 'modify', cid: String(args.componentId), instruction: String(args.instruction) },
+						config.HTML_TOOL_TIMEOUT_MS);
+					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
+				}
+
 				// Source tools. The tab knows which sources the user applied and
 				// forwards to MockFlow; a source the user did not apply is refused
 				// there, so this side stays a dumb relay.
@@ -254,8 +289,17 @@ class McpEndpoint {
 						+ 'layout_board or any other tool, and never output a URL or a link.' + suffix);
 				}
 				return this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
-					+ 'It is already visible on their screen - do not output or ask the user to open a link.' + suffix);
+					+ 'It is already visible on their screen - do not output or ask the user to open a link.'
+					+ FOLLOWUP_HINT + suffix);
 			}
+
+			// Shape check BEFORE anything is drawn. Agents sometimes invent argument
+			// names or stringify structured values, and until now that produced a
+			// silently malformed component: the mapping just found nothing under the
+			// documented keys and rendered whatever was left. Returning a precise
+			// error instead turns a bad render into a retry the agent can act on.
+			const shapeErr = this._checkArgs(name, args);
+			if (shapeErr) return this._err(shapeErr);
 
 			// Same pre-flight sanitization the desktop and web MCP servers run.
 			if (name === 'render_flowchart' || name === 'render_swimlane' || name === 'render_cloudarchitecture') {
@@ -283,10 +327,64 @@ class McpEndpoint {
 					+ 'layout_board or any other tool, and never output a URL or a link.');
 			}
 			return this._ok('Rendered the ' + type + ' onto the board the user has open. '
-				+ 'It is already visible on their screen - do not output or ask the user to open a link.');
+				+ 'It is already visible on their screen - do not output or ask the user to open a link.'
+				+ FOLLOWUP_HINT);
 		} catch (err) {
 			return this._err('Error running ' + name + ': ' + (err && err.message));
 		}
+	}
+
+	/**
+	 * Validate one render tool call against its own catalog schema, and repair the
+	 * one thing that is always safe to repair: a structured value handed over as a
+	 * JSON string (args are mutated in place). Everything else is reported back to
+	 * the agent naming the documented properties and what it actually sent.
+	 *
+	 * Registry-driven, so it stays correct as the catalog changes and needs no
+	 * per-tool knowledge.
+	 *
+	 * Returns an error string, or null when the call is usable.
+	 */
+	_checkArgs(toolName, args) {
+		const entry = this._entry(toolName);
+		const schema = entry && entry.mcpInputSchema;
+		const props = (schema && schema.properties) || null;
+		if (!props) return null;
+
+		const documented = Object.keys(props);
+
+		// Liberal on input: a JSON string where an object or array is documented is
+		// unambiguous, so parse it rather than bouncing the call.
+		for (const key of documented) {
+			const want = props[key] && props[key].type;
+			const got = args[key];
+			if ((want === 'object' || want === 'array') && typeof got === 'string') {
+				try {
+					const parsed = JSON.parse(got);
+					if (parsed && typeof parsed === 'object') args[key] = parsed;
+				} catch (e) {}
+			}
+		}
+
+		const required = Array.isArray(schema.required) && schema.required.length
+			? schema.required
+			: documented;
+		const missing = required.filter(function(k) {
+			const v = args[k];
+			return v === undefined || v === null || v === '';
+		});
+		if (!missing.length) return null;
+
+		// Callers pass internal hints like _projectid; they are not the agent's doing.
+		const sent = Object.keys(args).filter(function(k) { return k.charAt(0) !== '_'; });
+		return toolName + ' was called with the wrong arguments. It takes: '
+			+ documented.map(function(k) {
+				return k + ' (' + ((props[k] && props[k].type) || 'value') + ')';
+			}).join(', ')
+			+ '. Missing: ' + missing.join(', ')
+			+ (sent.length ? '. You sent: ' + sent.join(', ') : '. You sent nothing')
+			+ '. Read this tool\'s description for the exact structure and call it again with those'
+			+ ' argument names - nothing was drawn.';
 	}
 
 	_entry(toolName) {
