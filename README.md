@@ -46,13 +46,25 @@ follow the prompts. You only do this the first time.
 **3. A MockFlow board** open in your browser at
 [app.mockflow.com](https://app.mockflow.com).
 
-## Step 1: Start the bridge
+## Step 1: Install and start the bridge
 
-In your terminal, type:
+You have two ways to run it. Both are fine, pick one.
+
+**Option A: no install (simplest).** This downloads and runs the latest version
+each time:
 
 ```bash
 npx mockflow-bridge
 ```
+
+**Option B: install it once.** Then the command is shorter every time after:
+
+```bash
+npm i -g mockflow-bridge     # once
+mockflow-bridge              # every time you want to start it
+```
+
+To update an installed copy later, run `npm i -g mockflow-bridge` again.
 
 Leave this window open. It stays running and shows a **pairing code** that looks
 like `941-027`. If you close the window, the connection stops.
@@ -112,6 +124,9 @@ npx mockflow-bridge           # start it (leave the window open)
 npx mockflow-bridge status    # is it running, which boards are connected
 npx mockflow-bridge help      # all options
 ```
+
+If you installed it with `npm i -g`, drop the `npx` and just type
+`mockflow-bridge`, `mockflow-bridge status`, and so on.
 
 To stop it, press `Ctrl + C` in the terminal window, or just close the window.
 

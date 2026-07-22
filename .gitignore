@@ -1,1 +1,15 @@
 /node_modules/
+
+# Local pairing token written by the test tab (test/fake-tab.js). It is a
+# credential, not source: it must never be committed or published.
+test/.fake-tab-token
+
+# Editor / IDE project files
+.project
+.settings/
+.idea/
+*.iml
+.vscode/
+
+# OS noise
+.DS_Store
