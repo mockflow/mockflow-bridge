@@ -11,8 +11,9 @@
  *   {t:'chat-step',  id, step}   tool timeline row (same shape as ai-step)
  *   {t:'chat-done',  id, ok, text?, error?}
  *
- * Ported from MockFlow-AgentBoard's claudeCodeAdapter (stream-json parsing,
- * session resume). Design rules from the spec ("Local codebase access"):
+ * The CLI itself is pluggable: everything agent-specific (flags, output parsing,
+ * detection) lives in src/agents/<id>.js, and this file talks only to that
+ * contract. Design rules from the spec ("Local codebase access"):
  *   - workspace: agent runs in --workspace <path> (or MFBRIDGE_WORKSPACE);
  *     without one it runs in an empty scratch dir so it can read nothing.
  *   - read-only default: Read/Grep/Glob plus the bridge MCP tools only.
@@ -21,11 +22,12 @@
  *     memory and low latency.
  */
 
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const config = require('./config');
+const agents = require('./agents');
 
 const PERSONA =
 	'You are Mida, MockFlow\'s AI assistant, chatting inside the user\'s live IdeaBoard. '
@@ -69,32 +71,6 @@ const RESEARCH_GUIDANCE =
 	+ 'unknown specifics as neutral placeholders rather than inventing them.';
 
 /**
- * How to invoke the `claude` CLI portably. On Windows it is installed as a
- * .cmd shim which spawn() refuses to execute directly (EINVAL since the
- * CVE-2024-27980 hardening), so the call is routed through cmd.exe with
- * cross-spawn style argument escaping. Everywhere else it is a plain spawn.
- * Returns { file, args, opts } to splat into spawn/spawnSync.
- */
-function claudeSpawnSpec(args) {
-	if (process.platform !== 'win32') return { file: 'claude', args: args, opts: {} };
-	const line = ['claude'].concat(args.map(escapeCmdArgument)).join(' ');
-	return {
-		file: 'cmd.exe',
-		args: ['/d', '/s', '/c', '"' + line + '"'],
-		opts: { windowsVerbatimArguments: true }
-	};
-}
-
-/** cmd.exe argument escaping (same rules as the cross-spawn package):
- *  backslash-double quotes, quote the whole arg, caret-escape metachars. */
-function escapeCmdArgument(arg) {
-	arg = String(arg).replace(/(\\*)"/g, '$1$1\\"');
-	arg = arg.replace(/(\\*)$/, '$1$1');
-	arg = '"' + arg + '"';
-	return arg.replace(/([()\][%!^"`<>&|;, *?])/g, '^$1');
-}
-
-/**
  * Human label for a tool's timeline row. "lite" is an internal product suffix,
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
  */
@@ -117,13 +93,17 @@ function killProcTree(proc) {
 class AgentManager {
 	constructor(opts) {
 		this.log = (opts && opts.log) || function() {};
+		// The CLI this bridge runs turns on. Resolved by the daemon (flag, saved
+		// preference, or the only one installed); falls back to the first
+		// registered agent so nothing here has to null-check on every turn.
+		this.agent = (opts && opts.agent) || agents.AGENTS[0];
 		this.workspace = this._resolveWorkspace(opts && opts.workspace);
 		this.registry = (opts && opts.registry) || null; // catalog, for comptype->tool
 		this.sessions = new Map();    // projectid -> { sessionId, proc, busy }
 		this.attachDirs = new Map();  // key -> folder holding this session's attachments
 		this.compgenProcs = new Map(); // key -> child process (component-AI turns)
 		this.planProcs = new Map();    // key -> child process (plan_board continuation turns)
-		this.available = null;        // cached `claude` detection
+		this.available = null;        // cached detection for the selected agent
 	}
 
 	/**
@@ -262,46 +242,18 @@ class AgentManager {
 	 * list changes and needs no list of tool names of its own.
 	 */
 	_isRunnableTool(toolName, allowedTools) {
-		var name = String(toolName || '');
-		if (!name) return false;
-		var allowed = String(allowedTools || '').split(',');
-		for (var i = 0; i < allowed.length; i++) {
-			var a = allowed[i].trim();
-			if (!a) continue;
-			if (a === name) return true;
-			if (a.slice(-1) === '*' && name.indexOf(a.slice(0, -1)) === 0) return true;
-		}
-		return false;
+		return this.agent.isRunnableTool(toolName, allowedTools);
 	}
 
 	detect() {
 		if (this.available !== null) return this.available;
-		try {
-			const spec = claudeSpawnSpec(['--version']);
-			const r = spawnSync(spec.file, spec.args, Object.assign({ encoding: 'utf8' }, spec.opts));
-			this.available = r.status === 0;
-		} catch (e) {
-			this.available = false;
-		}
+		this.available = !!(this.agent.detect() || {}).available;
 		return this.available;
 	}
 
-	/** Token the daemon persisted for its MCP endpoint (see daemon.js). */
-	_mcpToken() {
-		try { return fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim(); }
-		catch (e) { return ''; }
-	}
-
-	_mcpConfigPath() {
-		const cfg = {
-			mcpServers: {
-				mockflow: { type: 'http', url: 'http://127.0.0.1:' + config.PORT + '/mcp/' + this._mcpToken() }
-			}
-		};
-		const p = path.join(config.HOME_DIR, 'bridge-agent-mcp.json');
-		fs.mkdirSync(config.HOME_DIR, { recursive: true });
-		fs.writeFileSync(p, JSON.stringify(cfg, null, '\t'));
-		return p;
+	/** What to tell the user when the selected agent is not installed. */
+	missingHint() {
+		return this.agent.installHint();
 	}
 
 	/**
@@ -343,7 +295,7 @@ class AgentManager {
 		if (!this.detect()) {
 			return sendToTab({
 				t: 'chat-done', id: turnId, ok: false,
-				error: 'Claude Code is not installed on this machine. Install it with: npm i -g @anthropic-ai/claude-code, sign in once with `claude`, then try again.'
+				error: this.missingHint()
 			});
 		}
 
@@ -390,22 +342,21 @@ class AgentManager {
 		}
 
 		const allowedTools = this._allowedTools();
-		const args = [
-			'-p', turnText,
-			'--output-format', 'stream-json',
-			'--verbose',
-			// Announces each tool as it starts, so the board shows "Drawing …" while the
-			// agent is still writing the call instead of after it (see handleLine).
-			'--include-partial-messages',
-			'--mcp-config', this._mcpConfigPath(),
-			'--allowedTools', allowedTools,
-			'--append-system-prompt', systemPrompt
-		];
 		// Attachments live outside the workspace (and there may be no workspace at
 		// all), so the agent needs that one folder added to its readable set.
 		const attachDir = this.attachDirs.get(boardKey);
-		if (attachDir) args.push('--add-dir', attachDir);
-		if (session.sessionId) args.push('--resume', session.sessionId);
+		// A session id is only worth passing to an agent that can resume by id;
+		// one that cannot simply starts fresh (its own turns still carry the
+		// conversation because the prompt is self-contained).
+		const canResume = this.agent.capabilities.resume === 'by-id';
+		const spec = this.agent.buildArgs({
+			prompt: turnText,
+			systemPrompt: systemPrompt,
+			allowedTools: allowedTools,
+			extraDirs: attachDir ? [attachDir] : [],
+			resume: canResume ? session.sessionId : null,
+			partialMessages: true
+		});
 
 		this.log('Local agent turn for board "' + (tab.title || key) + '"'
 			+ (session.sessionId ? ' (resumed session)' : ' (new session)')
@@ -413,8 +364,10 @@ class AgentManager {
 
 		var proc;
 		try {
-			const spec = claudeSpawnSpec(args);
-			proc = spawn(spec.file, spec.args, Object.assign({ env: process.env, cwd: this.workspace }, spec.opts));
+			proc = this.agent.spawn(spec.args, {
+				env: Object.assign({}, process.env, spec.env || {}),
+				cwd: this.workspace
+			});
 		} catch (err) {
 			session.busy = false;
 			hub.selectedProjectId = prevSelected;
@@ -448,48 +401,28 @@ class AgentManager {
 		}
 
 		function handleLine(line) {
-			var evt;
-			try { evt = JSON.parse(line); } catch (e) { return; }
-
-			if (evt.session_id && !session.sessionId) session.sessionId = evt.session_id;
-
-			// Partial stream (--include-partial-messages): content_block_start names the
-			// tool as soon as the model starts calling it. Without this the step row only
-			// appears once the whole tool_use block is written, which for the HTML tools
-			// means a long silent gap while thousands of characters of markup stream out.
-			if (evt.type === 'stream_event') {
-				var sev = evt.event || {};
-				if (sev.type === 'content_block_start' && sev.content_block
-					&& sev.content_block.type === 'tool_use') {
-					startStep(sev.content_block.id, sev.content_block.name);
-				}
-				return;
-			}
-
-			if (evt.type === 'assistant') {
-				var content = (evt.message && evt.message.content) || [];
-				for (var i = 0; i < content.length; i++) {
-					var block = content[i];
-					if (block.type === 'text' && block.text) {
-						replyText += (replyText ? '\n\n' : '') + block.text;
-						sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
-					} else if (block.type === 'tool_use') {
-						startStep(block.id, block.name);
-					}
-				}
-			} else if (evt.type === 'user') {
-				var ucontent = (evt.message && evt.message.content) || [];
-				for (var j = 0; j < ucontent.length; j++) {
-					var ublock = ucontent[j];
-					if (ublock.type === 'tool_result') {
-						var open = openSteps[ublock.tool_use_id];
-						if (open) {
-							delete openSteps[ublock.tool_use_id];
-							sendToTab({
-								t: 'chat-step', id: turnId,
-								step: { stepId: open.stepId, phase: 'end', ok: !ublock.is_error, elapsedMs: Date.now() - open.started }
-							});
-						}
+			var events = self.agent.parseLine(line);
+			for (var e = 0; e < events.length; e++) {
+				var ev = events[e];
+				if (ev.type === 'session') {
+					if (!session.sessionId) session.sessionId = ev.id;
+				} else if (ev.type === 'text') {
+					// Agents differ in what a text event carries: whole blocks (joined
+					// with a blank line) or incremental deltas (appended verbatim).
+					replyText += (self.agent.capabilities.textChunks === 'delta')
+						? ev.text
+						: (replyText ? '\n\n' : '') + ev.text;
+					sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
+				} else if (ev.type === 'tool-start') {
+					startStep(ev.id, ev.name);
+				} else if (ev.type === 'tool-end') {
+					var open = openSteps[ev.id];
+					if (open) {
+						delete openSteps[ev.id];
+						sendToTab({
+							t: 'chat-step', id: turnId,
+							step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
+						});
 					}
 				}
 			}
@@ -595,7 +528,7 @@ class AgentManager {
 		if (!this.detect()) {
 			return sendToTab({
 				t: 'compgen-done', id: turnId, ok: false, fallback: true,
-				error: 'Claude Code is not installed, so component AI cannot run on the local agent.'
+				error: this.agent.label + ' is not installed, so component AI cannot run on the local agent.'
 			});
 		}
 		if (this.compgenProcs.has(key) || hub.hasCapture(tab.projectid)) {
@@ -669,22 +602,22 @@ class AgentManager {
 				+ ' Always finish by calling the render tool with complete data.';
 		}
 
-		const args = [
-			'-p', prompt,
-			'--output-format', 'stream-json',
-			'--verbose',
-			'--mcp-config', this._mcpConfigPath(),
-			'--allowedTools', allowed,
-			'--append-system-prompt', systemPrompt
-		];
+		const spec = this.agent.buildArgs({
+			prompt: prompt,
+			systemPrompt: systemPrompt,
+			allowedTools: allowed,
+			partialMessages: false
+		});
 
 		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
 			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + this.workspace);
 
 		var proc;
 		try {
-			const spec = claudeSpawnSpec(args);
-			proc = spawn(spec.file, spec.args, Object.assign({ env: process.env, cwd: this.workspace }, spec.opts));
+			proc = this.agent.spawn(spec.args, {
+				env: Object.assign({}, process.env, spec.env || {}),
+				cwd: this.workspace
+			});
 		} catch (err) {
 			hub.clearCapture(tab.projectid);
 			hub.selectedProjectId = prevSelected;
@@ -698,31 +631,23 @@ class AgentManager {
 		var toolCalled = false;
 
 		function handleLine(line) {
-			var evt;
-			try { evt = JSON.parse(line); } catch (e) { return; }
-
-			if (evt.type === 'assistant') {
-				var content = (evt.message && evt.message.content) || [];
-				for (var i = 0; i < content.length; i++) {
-					var block = content[i];
-					if (block.type === 'tool_use') {
-						toolCalled = true;
-						var stepId = 'cg_' + turnId + '_' + (stepCounter++);
-						openSteps[block.id || stepId] = { stepId: stepId, started: Date.now() };
-						var label = String(block.name || 'tool').replace(/^mcp__mockflow__/, '').replace(/^render_/, 'Generating ').replace(/_/g, ' ');
-						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: block.name, label: label, detail: '' } });
-					}
-				}
-			} else if (evt.type === 'user') {
-				var ucontent = (evt.message && evt.message.content) || [];
-				for (var j = 0; j < ucontent.length; j++) {
-					var ublock = ucontent[j];
-					if (ublock.type === 'tool_result') {
-						var open = openSteps[ublock.tool_use_id];
-						if (open) {
-							delete openSteps[ublock.tool_use_id];
-							sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: !ublock.is_error, elapsedMs: Date.now() - open.started } });
-						}
+			var events = self.agent.parseLine(line);
+			for (var e = 0; e < events.length; e++) {
+				var ev = events[e];
+				if (ev.type === 'tool-start') {
+					toolCalled = true;
+					// Idempotent per tool id: an agent that announces a tool before it
+					// runs (and again when the call is complete) must not open two rows.
+					if (ev.id && openSteps[ev.id]) continue;
+					var stepId = 'cg_' + turnId + '_' + (stepCounter++);
+					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
+					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__/, '').replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
+				} else if (ev.type === 'tool-end') {
+					var open = openSteps[ev.id];
+					if (open) {
+						delete openSteps[ev.id];
+						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
 					}
 				}
 			}
@@ -799,9 +724,9 @@ class AgentManager {
 		const send = sendToTab || function() {};
 		if (!items.length) return;
 		if (!this.detect()) {
-			this.log('[plan] generate skipped: Claude Code is not installed.');
+			this.log('[plan] generate skipped: ' + this.agent.label + ' is not installed.');
 			hub.clearPlan(tab.projectid);
-			send({ t: 'plan-done', ok: false, error: 'Claude Code is not installed on this machine, so the plan could not be generated locally.' });
+			send({ t: 'plan-done', ok: false, error: this.agent.label + ' is not installed on this machine, so the plan could not be generated locally.' });
 			return;
 		}
 		if (this.planProcs.has(key)) {
@@ -841,26 +766,25 @@ class AgentManager {
 				+ ' Always finish by rendering every planned item.';
 		}
 
-		const args = [
-			'-p', prompt,
-			'--output-format', 'stream-json',
-			'--verbose',
-			// Announces each render tool the moment the model starts writing it, so the
-			// step row appears immediately instead of after thousands of characters of
-			// HTML have streamed out (same reason the chat turn uses it).
-			'--include-partial-messages',
-			'--mcp-config', this._mcpConfigPath(),
-			'--allowedTools', allowed,
-			'--append-system-prompt', systemPrompt
-		];
+		// partialMessages: announces each render tool the moment the model starts
+		// writing it, so the step row appears immediately instead of after thousands
+		// of characters of HTML have streamed out (same reason the chat turn uses it).
+		const spec = this.agent.buildArgs({
+			prompt: prompt,
+			systemPrompt: systemPrompt,
+			allowedTools: allowed,
+			partialMessages: true
+		});
 
 		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
 			+ items.map(function(it) { return it.tool; }).join(', ') + ']');
 
 		var proc;
 		try {
-			const spec = claudeSpawnSpec(args);
-			proc = spawn(spec.file, spec.args, Object.assign({ env: process.env, cwd: this.workspace }, spec.opts));
+			proc = this.agent.spawn(spec.args, {
+				env: Object.assign({}, process.env, spec.env || {}),
+				cwd: this.workspace
+			});
 		} catch (err) {
 			this.log('[plan] generate launch failed: ' + err.message);
 			hub.clearPlan(tab.projectid);
@@ -898,36 +822,20 @@ class AgentManager {
 		}
 
 		function handleLine(line) {
-			var evt;
-			try { evt = JSON.parse(line); } catch (e) { return; }
-
-			if (evt.type === 'stream_event') {
-				var sev = evt.event || {};
-				if (sev.type === 'content_block_start' && sev.content_block
-					&& sev.content_block.type === 'tool_use') {
-					startStep(sev.content_block.id, sev.content_block.name);
-				}
-				return;
-			}
-
-			if (evt.type === 'assistant') {
-				var content = (evt.message && evt.message.content) || [];
-				for (var i = 0; i < content.length; i++) {
-					if (content[i].type === 'tool_use') startStep(content[i].id, content[i].name);
-				}
-			} else if (evt.type === 'user') {
-				var ucontent = (evt.message && evt.message.content) || [];
-				for (var j = 0; j < ucontent.length; j++) {
-					var ublock = ucontent[j];
-					if (ublock.type !== 'tool_result') continue;
-					var open = openSteps[ublock.tool_use_id];
+			var events = self.agent.parseLine(line);
+			for (var e = 0; e < events.length; e++) {
+				var ev = events[e];
+				if (ev.type === 'tool-start') {
+					startStep(ev.id, ev.name);
+				} else if (ev.type === 'tool-end') {
+					var open = openSteps[ev.id];
 					if (!open) continue;
-					delete openSteps[ublock.tool_use_id];
+					delete openSteps[ev.id];
 					self.log('[plan] step end: "' + (open.name || open.stepId) + '" '
-						+ (ublock.is_error ? 'FAILED' : 'ok') + ' in ' + (Date.now() - open.started) + 'ms');
+						+ (ev.ok ? 'ok' : 'FAILED') + ' in ' + (Date.now() - open.started) + 'ms');
 					send({
 						t: 'plan-step',
-						step: { stepId: open.stepId, phase: 'end', ok: !ublock.is_error, elapsedMs: Date.now() - open.started }
+						step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
 					});
 				}
 			}

@@ -65,6 +65,8 @@ module.exports = {
 	// the user has open, via a cross-origin POST - could drive the board tools
 	// and now read the user's connected sources through them.
 	MCP_TOKEN_FILE: path.join(HOME_DIR, 'bridge-mcp-token'),
+	// Which local agent CLI the user picked when several are installed.
+	AGENT_FILE: path.join(HOME_DIR, 'bridge-agent'),
 	CATALOG_CACHE_FILE: path.join(HOME_DIR, 'bridge-catalog-cache.js'),
 
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,

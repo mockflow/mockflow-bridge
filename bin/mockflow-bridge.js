@@ -61,13 +61,20 @@ function help() {
 	console.log('  ' + paint.teal('MFBRIDGE_CATALOG_URL') + '      catalog endpoint override');
 	console.log('  ' + paint.teal('MFBRIDGE_ALLOWED_ORIGINS') + '  extra comma-separated WS origins');
 	console.log('  ' + paint.teal('MFBRIDGE_DEV=1') + '            dev mode (allow any WS origin, e.g. file:// test pages)');
+	console.log('  ' + paint.teal('MFBRIDGE_AGENT') + '            local agent CLI to run turns on (same as --agent)');
+	console.log('');
+	console.log(paint.bold('Options:'));
+	console.log('  ' + paint.teal('--workspace <path>') + '        let the agent read one folder');
+	console.log('  ' + paint.teal('--agent <id>') + '              which installed agent CLI to use');
 }
 
-if (cmd === 'start' || cmd === '--workspace') {
-	// `mockflow-bridge [start] [--workspace <path>]`
+if (cmd === 'start' || cmd === '--workspace' || cmd === '--agent') {
+	// `mockflow-bridge [start] [--workspace <path>] [--agent <id>]`
 	var wsIdx = process.argv.indexOf('--workspace');
 	var workspace = wsIdx !== -1 ? process.argv[wsIdx + 1] : null;
-	require('../src/daemon').start({ workspace: workspace }).catch(function(err) {
+	var agIdx = process.argv.indexOf('--agent');
+	var agent = agIdx !== -1 ? process.argv[agIdx + 1] : (process.env.MFBRIDGE_AGENT || null);
+	require('../src/daemon').start({ workspace: workspace, agent: agent }).catch(function(err) {
 		console.error('Failed to start: ' + (err && err.message));
 		process.exit(1);
 	});

@@ -35,7 +35,17 @@ async function start(opts) {
 	// Mode B: Mida/CB "Local agent" chat turns run on the user's own headless
 	// Claude Code, spawned by the agent manager.
 	const AgentManager = require('./agentManager');
-	const agents = new AgentManager({ log: log, workspace: opts && opts.workspace, registry: loaded.registry });
+	// Which CLI runs local turns. Resolved before anything starts so the startup
+	// box can report it, and so an ambiguous setup is settled by the user once
+	// rather than guessed on every turn.
+	const agentRegistry = require('./agents');
+	const picked = await resolveAgent(agentRegistry, opts && opts.agent);
+	const agents = new AgentManager({
+		log: log,
+		workspace: opts && opts.workspace,
+		registry: loaded.registry,
+		agent: picked.agent
+	});
 	hub.onChat = function(tab, frame, sendToTab) {
 		agents.handleChat(tab, frame, sendToTab, hub);
 	};
@@ -57,6 +67,10 @@ async function start(opts) {
 	// (only offer "brainstorm your files" when a workspace is actually set).
 	hub.agentInfo = {
 		hasLocalAgent: agents.detect(),
+		// Which agent is answering, so the editor can say so instead of assuming.
+		agentId: picked.agent ? picked.agent.id : null,
+		agentName: picked.agent ? picked.agent.label : null,
+		agents: picked.choices.map(function(c) { return { id: c.id, label: c.label }; }),
 		hasWorkspace: !!agents.hasWorkspace,
 		workspaceName: agents.hasWorkspace ? path.basename(agents.workspace) : null,
 		port: config.PORT,
@@ -178,8 +192,8 @@ async function start(opts) {
 		['Board socket', 'ws://' + config.HOST + ':' + config.PORT + '/board'],
 		['Catalog', loaded.source + ' (' + loaded.registry.length + ' tools)'],
 		['Local agent', agents.detect()
-			? paint.green('✓') + ' Claude Code found'
-			: paint.yellow('✗ Claude Code not found - Mida local chat unavailable')],
+			? paint.green('✓') + ' ' + picked.agent.label + ' (' + describeAgents(picked.choices) + ')'
+			: paint.yellow('✗ no supported agent CLI found - Mida local chat unavailable')],
 		['Workspace', agents.hasWorkspace
 			? ui.shortenPath(agents.workspace)
 			: paint.dim('off - add --workspace <path> to let Mida read one folder')],
@@ -280,6 +294,61 @@ function cors(res) {
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers',
 		'Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
+}
+
+/**
+ * Decide which local agent CLI to run turns on.
+ *
+ * An explicit choice (flag or env) wins, then a previously saved one, then the
+ * only installed CLI. Only a genuinely ambiguous setup - several installed and
+ * nothing chosen yet - asks, and the answer is remembered. A non-interactive
+ * start never blocks: it takes the first installed agent and says so.
+ */
+async function resolveAgent(registry, explicit) {
+	const picked = registry.resolve(explicit);
+
+	if (picked.reason === 'unknown-agent') {
+		const known = registry.AGENTS.map(function(a) { return a.id; }).join(', ');
+		throw new Error('Unknown agent "' + explicit + '". Known agents: ' + known + '.');
+	}
+	if (picked.reason !== 'ambiguous') return picked;
+
+	if (!process.stdin.isTTY) {
+		const first = picked.choices[0];
+		log('Several agent CLIs installed and no choice saved; using ' + first.label
+			+ '. Set --agent or MFBRIDGE_AGENT to pick another.');
+		return { agent: first.agent, reason: 'auto', choices: picked.choices };
+	}
+
+	const chosen = await askWhichAgent(picked.choices);
+	registry.savePreference(chosen.id);
+	return { agent: chosen.agent, reason: 'asked', choices: picked.choices };
+}
+
+/** One-time terminal picker. Any invalid answer falls through to the first. */
+function askWhichAgent(choices) {
+	const paint = ui.err;
+	console.error('');
+	console.error(paint.bold('Which agent should MockFlow run local turns on?'));
+	choices.forEach(function(c, i) {
+		console.error('  ' + paint.teal(String(i + 1)) + '. ' + c.label + (c.version ? paint.dim(' ' + c.version) : ''));
+	});
+	console.error(paint.dim('  (remembered for next time - change it with --agent)'));
+	return new Promise(function(resolve) {
+		const readline = require('readline');
+		const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+		rl.question('  Choice [1]: ', function(answer) {
+			rl.close();
+			const idx = parseInt(String(answer).trim(), 10) - 1;
+			resolve(choices[idx] || choices[0]);
+		});
+	});
+}
+
+function describeAgents(choices) {
+	if (!choices.length) return 'none installed';
+	if (choices.length === 1) return 'the only one installed';
+	return choices.map(function(c) { return c.label; }).join(', ') + ' installed';
 }
 
 /** Read the persisted MCP token, creating one on first run. */
