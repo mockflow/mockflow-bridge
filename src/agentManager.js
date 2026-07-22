@@ -114,6 +114,7 @@ class AgentManager {
 		this.workspace = this._resolveWorkspace(opts && opts.workspace);
 		this.registry = (opts && opts.registry) || null; // catalog, for comptype->tool
 		this.sessions = new Map();    // projectid -> { sessionId, proc, busy }
+		this.attachDirs = new Map();  // key -> folder holding this session's attachments
 		this.compgenProcs = new Map(); // key -> child process (component-AI turns)
 		this.planProcs = new Map();    // key -> child process (plan_board continuation turns)
 		this.available = null;        // cached `claude` detection
@@ -176,6 +177,59 @@ class AgentManager {
 		var scratch = path.join(os.tmpdir(), 'mockflow-bridge-scratch');
 		try { fs.mkdirSync(scratch, { recursive: true }); } catch (e) {}
 		return scratch;
+	}
+
+	/**
+	 * Write one attached file into this board session's folder and return its
+	 * absolute path. Files stay for the session so follow-up questions ("now
+	 * summarise section 3") work without re-attaching, and are removed by
+	 * clearAttachments when the tab disconnects or the bridge exits.
+	 *
+	 * The name is sanitized and the path re-checked against the session folder:
+	 * the name comes from a browser, and a crafted one must not be able to write
+	 * outside it.
+	 */
+	_saveAttachment(key, attachment) {
+		const dir = path.join(config.HOME_DIR, 'attachments', String(key).replace(/[^\w.-]/g, '_'));
+		fs.mkdirSync(dir, { recursive: true });
+		this.attachDirs.set(key, dir);
+
+		const safeName = path.basename(String(attachment.name || 'attachment')).replace(/[^\w.\- ]/g, '_') || 'attachment';
+		const target = path.join(dir, safeName);
+		if (path.relative(dir, target).startsWith('..')) throw new Error('Invalid file name');
+
+		fs.writeFileSync(target, Buffer.from(String(attachment.data || ''), 'base64'));
+		this.log('Saved attachment for board "' + key + '": ' + target);
+		return target;
+	}
+
+	/** How the agent is told about the file it can now read. */
+	_attachmentPrompt(filePath, kind) {
+		const head = 'The user attached a file. It is saved on this machine at: ' + filePath
+			+ '\nRead it before answering - do not ask the user to paste its contents.';
+		if (kind === 'whiteboard') {
+			return head + '\nIt is a photo of a whiteboard or a hand-drawn sketch. Transcribe what is actually'
+				+ ' written and drawn on it, keeping the author\'s own wording and grouping, then render that'
+				+ ' on the board. Do not invent items that are not in the photo.';
+		}
+		if (kind === 'image') {
+			return head + '\nIt is an image. Base your answer on what it actually shows.';
+		}
+		return head;
+	}
+
+	/** Drop a board session's attachments (tab disconnected, or bridge exiting). */
+	clearAttachments(key) {
+		const dir = this.attachDirs.get(key);
+		if (!dir) return;
+		this.attachDirs.delete(key);
+		try { fs.rmSync(dir, { recursive: true, force: true }); }
+		catch (e) { this.log('Could not remove attachments for "' + key + '":', e && e.message); }
+	}
+
+	clearAllAttachments() {
+		const keys = Array.from(this.attachDirs.keys());
+		for (const k of keys) this.clearAttachments(k);
 	}
 
 	detect() {
@@ -266,8 +320,23 @@ class AgentManager {
 				+ 'thinking happen on their own machine.';
 		}
 
+		// A file the user attached in Mida. It arrived over the localhost socket
+		// (never through MockFlow), so it is written to this session's own folder
+		// and the agent is pointed at it. Multimodal agents read text, PDFs and
+		// images natively, so nothing has to be extracted for them.
+		var turnText = text;
+		if (frame.attachment) {
+			try {
+				const saved = this._saveAttachment(key, frame.attachment);
+				turnText = this._attachmentPrompt(saved, frame.attachment.kind) + '\n\n' + text;
+			} catch (e) {
+				this.log('Could not save attachment:', e && e.message);
+				return sendToTab({ t: 'chat-done', id: turnId, ok: false, error: 'Could not save the attached file on this machine: ' + (e && e.message) });
+			}
+		}
+
 		const args = [
-			'-p', text,
+			'-p', turnText,
 			'--output-format', 'stream-json',
 			'--verbose',
 			// Announces each tool as it starts, so the board shows "Drawing …" while the
@@ -277,6 +346,10 @@ class AgentManager {
 			'--allowedTools', this._allowedTools(),
 			'--append-system-prompt', systemPrompt
 		];
+		// Attachments live outside the workspace (and there may be no workspace at
+		// all), so the agent needs that one folder added to its readable set.
+		const attachDir = this.attachDirs.get(key);
+		if (attachDir) args.push('--add-dir', attachDir);
 		if (session.sessionId) args.push('--resume', session.sessionId);
 
 		this.log('Local agent turn for board "' + (tab.title || key) + '"'

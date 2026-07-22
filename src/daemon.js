@@ -37,6 +37,9 @@ async function start(opts) {
 		agents.handleChat(tab, frame, sendToTab, hub);
 	};
 	hub.onChatCancel = function(tab) { agents.cancel(tab); };
+	// Attachments are session-scoped: they live on disk while the board tab is
+	// open (so follow-up questions about the same file work) and go when it closes.
+	hub.onTabGone = function(tab) { agents.clearAttachments(tab.projectid || tab.id); };
 	// Component QuickSettings AI (Generate / Modify / Convert) run on the same agent.
 	hub.onCompGen = function(tab, frame, sendToTab) {
 		agents.handleCompGen(tab, frame, sendToTab, hub);
@@ -197,6 +200,7 @@ async function start(opts) {
 
 	function shutdown() {
 		log('Shutting down');
+		agents.clearAllAttachments();
 		hub.stop();
 		server.close();
 		removePortFile();

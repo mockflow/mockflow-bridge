@@ -138,6 +138,9 @@ class BoardHub {
 			if (tab.registered) {
 				self.log('Board disconnected: "' + (tab.title || tab.projectid) + '"');
 			}
+			// Files the user attached during this board's session were saved on
+			// their machine for follow-up questions; the session is over now.
+			if (self.onTabGone) self.onTabGone(tab);
 		});
 	}
 
