@@ -42,11 +42,15 @@
 const fs = require('fs');
 const config = require('../config');
 
+// Only CLIs whose every flow has been exercised end to end against a real board
+// belong here. An adapter written from a vendor's documentation looks finished
+// and is not: the opencode one parsed an event schema that CLI never emits and
+// exposed no board tools at all, and nothing said so until a live turn ran.
+// Add the module back (git history has both) once chat, a resumed turn and a
+// component turn have all been seen working.
 const AGENTS = [
 	require('./claude'),
-	require('./opencode'),
-	require('./codex'),
-	require('./cursor')
+	require('./codex')
 ];
 
 function byId(id) {

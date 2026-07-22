@@ -104,9 +104,8 @@ async function load() {
 /**
  * How to wire one agent CLI to this bridge, as the startup box prints it.
  *
- * Vendor CLI syntax churns (Codex grew `mcp add --url`, opencode has no add
- * command at all), so a catalog may carry it and fix it for everyone without an
- * npm publish:
+ * Vendor CLI syntax churns (Codex grew `mcp add --url` at some point), so a
+ * catalog may carry the line and fix it for everyone without an npm publish:
  *
  *   registry.agentWiring = {
  *     codex: { title: 'Add to Codex:', lines: ['codex mcp add mockflow --url {endpoint}'] }

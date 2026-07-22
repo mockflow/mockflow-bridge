@@ -2,7 +2,7 @@
  * MockFlow Bridge - daemon.
  *
  * One long-running localhost process with two faces:
- *   POST /mcp/<token>  JSON-RPC MCP endpoint for agents (Claude Code, Cursor, ...)
+ *   POST /mcp/<token>  JSON-RPC MCP endpoint for agents (Claude Code, Codex, ...)
  *                     token-gated: the endpoint has no other auth and browsers
  *                     can reach localhost, so the secret is the door
  *   WS   /board  live editor tabs (pairing + tool execution), see boardHub.js

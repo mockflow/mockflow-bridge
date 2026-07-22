@@ -2,7 +2,7 @@
  * MockFlow Bridge - MCP endpoint (JSON-RPC method handling).
  *
  * Transport-agnostic: the daemon exposes this over POST /mcp and the stdio
- * shim proxies to the same endpoint, so every MCP client (Claude Code, Cursor,
+ * shim proxies to the same endpoint, so every MCP client (Claude Code, Codex,
  * Codex, ...) sees one identical server.
  *
  * Tool set = catalog render_* tools (drawn live on the connected board via the

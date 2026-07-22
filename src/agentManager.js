@@ -84,8 +84,8 @@ function toolStepLabel(toolName) {
 /**
  * The most useful line of an agent's stderr, for the "it exited unexpectedly"
  * message. Agents colorize and pad their errors, so the literal last line is
- * often blank or an escape sequence - which is how a real cause (e.g. opencode
- * failing to open its own log file) reaches the user as "( )".
+ * often blank or an escape sequence - which is how a real cause (an agent CLI
+ * failing to open its own log file, say) reaches the user as "( )".
  */
 function lastErrorLine(stderrTail, max) {
 	const lines = String(stderrTail || '')
