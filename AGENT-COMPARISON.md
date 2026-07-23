@@ -34,17 +34,11 @@ Only CLIs that have been run end to end against a real board are supported - see
 | "Drawing…" appears while it works | Yes, while it writes the drawing | Only as the drawing lands | Only as the drawing lands |
 | Remembers earlier messages | Yes | Yes | Yes |
 | Reads a folder you point it at | Yes | Yes | Yes |
-| Attachments (files, images) | Yes | Yes | **No** |
+| Attachments (files, images) | Yes | Yes | Yes |
 | **Web search** | **On** | **Off by default** | Fetch only, depends on your setup |
 | Choose your own model | No | No | **Yes** |
 | Connected sources (Notion, Jira, Slack) | Yes | Yes | Yes |
 | Costs MockFlow AI credits | No | No | No |
-
-opencode is the one that cannot take attachments. The bridge saves an attached
-file under `~/.mockflow/attachments/<board>/` and points the agent at it;
-opencode's file tools are confined to its working directory, so it answers
-"that path is outside my accessible directories" (`test/fake-attach.js`).
-Claude Code and Codex both read it. Everything else in a turn works normally.
 
 ## What the two "in one piece" rows mean
 
@@ -102,7 +96,7 @@ breaking.
 | `restrictTools` | `per-run` | `per-run` | `per-run` |
 | `resume` | `by-id` | `by-id` | `by-id` |
 | `systemPrompt` | `flag` | `config` | `config` |
-| `extraDirs` | true | false (read-only sandbox already permits reading) | false (no equivalent) |
+| `extraDirs` | true | false (read-only sandbox already permits reading) | false (attachments go through `-f` instead) |
 
 A `streamsPartialText: false` agent has its text held back until the turn ends,
 so the tab shows one honest "working" state instead of a reply that looks
@@ -203,7 +197,7 @@ agent thinking forever.
 | --- | --- |
 | Claude Code | In production use, plus the full battery: chat, resumed turn, component Generate and Modify, in-place edit, attachment |
 | Codex | Full battery, live, after four adapter fixes (stdin, tool approval, resume flags, app connectors) |
-| opencode | Full battery, live, after the adapter was rewritten from observed events. Attachment is the one flow it fails, by design of its file tools |
+| opencode | Full battery, live, after the adapter was rewritten from observed events, including attachments (via `-f`, the prompt kept before the flag) |
 
 ## How support is added
 

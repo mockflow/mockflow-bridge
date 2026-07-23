@@ -408,10 +408,12 @@ class AgentManager {
 		// and the agent is pointed at it. Multimodal agents read text, PDFs and
 		// images natively, so nothing has to be extracted for them.
 		var turnText = text;
+		var attachmentPaths = [];
 		if (frame.attachment) {
 			try {
 				const saved = this._saveAttachment(boardKey, frame.attachment);
 				turnText = this._attachmentPrompt(saved, frame.attachment.kind) + '\n\n' + text;
+				attachmentPaths = [saved];
 			} catch (e) {
 				this.log('Could not save attachment:', e && e.message);
 				return sendToTab({ t: 'chat-done', id: turnId, ok: false, error: 'Could not save the attached file on this machine: ' + (e && e.message) });
@@ -433,6 +435,11 @@ class AgentManager {
 			allowedTools: allowedTools,
 			mockflowTools: this._mockflowToolNames(),
 			extraDirs: attachDir ? [attachDir] : [],
+			// The saved attachment file(s). Agents that grant folder access read
+			// them via the in-prompt path plus extraDirs; one whose file tools are
+			// confined to the workspace (opencode) attaches them to the message
+			// instead. Empty when nothing was attached.
+			attachments: attachmentPaths,
 			resume: canResume ? session.sessionId : null,
 			partialMessages: true
 		});

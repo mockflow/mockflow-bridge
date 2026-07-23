@@ -100,8 +100,8 @@ module.exports = {
 		resume: 'by-id',
 		systemPrompt: 'config',
 		// No --add-dir equivalent, and its read tool refuses paths outside the
-		// working directory, so attachments (which live under ~/.mockflow) cannot
-		// be handed to it. Everything else in a turn still works.
+		// working directory. Attachments still work, but through `-f` (see
+		// buildArgs), not by granting a directory.
 		extraDirs: false
 	},
 
@@ -158,8 +158,14 @@ module.exports = {
 
 		const args = ['run', '--format', 'json', '--agent', 'mfbridge'];
 		if (turn.resume) args.push('-s', turn.resume);
-		// Prompt last: `run` takes it as a positional.
+
+		// Prompt is the positional, and it MUST come before any `-f`: opencode's
+		// -f takes one or more values greedily, so a prompt after it is swallowed
+		// as another filename ("File not found: <the prompt text>"). Attachments
+		// go through -f because opencode's read tool refuses paths outside the
+		// working directory - this is how it reads a file the user attached in Mida.
 		args.push(turn.prompt);
+		(turn.attachments || []).forEach(function(p) { if (p) args.push('-f=' + p); });
 
 		return {
 			args: args,
