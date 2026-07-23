@@ -76,7 +76,7 @@ async function status() {
 		data = await resp.json();
 	} catch (e) {
 		console.log(paint.yellow('●') + ' ' + paint.bold('MockFlow Bridge') + ' is NOT running. Start it with: '
-			+ paint.teal('npx @mockflow/mockflow-bridge'));
+			+ paint.teal('mockflow-bridge'));
 		console.log('  ' + paint.dim('all commands') + ' : ' + paint.teal('mockflow-bridge help'));
 		process.exitCode = 1;
 		return;

@@ -358,7 +358,7 @@ async function start(opts) {
 			'Mida cannot read any files on this computer. To let it read one',
 			'folder (e.g. a repo to brainstorm or diagram), restart with:',
 			'',
-			'  ' + paint.teal('npx @mockflow/mockflow-bridge --workspace <path-to-folder>'),
+			'  ' + paint.teal('mockflow-bridge --workspace <path-to-folder>'),
 			'',
 			paint.dim('Files are only read locally. Nothing is ever uploaded to MockFlow.')
 		], paint.yellow, paint));

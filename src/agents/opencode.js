@@ -158,7 +158,7 @@ module.exports = {
 			title: 'Add to opencode  (~/.config/opencode/opencode.json):',
 			lines: [
 				'"mcp": { "mockflow": { "type": "local", "enabled": true,',
-				'         "command": ["npx", "-y", "@mockflow/mockflow-bridge", "stdio"] } }'
+				'         "command": ["mockflow-bridge", "stdio"] } }'
 			]
 		};
 	},

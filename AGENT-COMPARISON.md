@@ -1,12 +1,20 @@
 # Which AI assistant should I use?
 
-MockFlow Bridge works with three assistants: **Claude Code**, **Codex** and
-**opencode**. Any of them draws on your board, so if you already pay for one,
-use that one. This page is for deciding when you have no preference, and for the
-technical detail behind the differences.
+MockFlow Bridge works with three assistant apps &mdash; **Claude Code**,
+**Codex** and **opencode** &mdash; plus **BridgeAI**, a fourth option built into
+the bridge that uses an API key instead of a separate app. Any of them draws on
+your board, so if you already pay for one of the apps, use that one; if you have
+none, BridgeAI is the quickest start. This page is for deciding when you have no
+preference, and for the technical detail behind the differences.
 
-Everything here was checked against these versions: Claude Code 2.1.216,
-Codex 0.145.0, opencode 1.18.4.
+Parts 1 and 2 compare the three assistant **apps** in depth, since each was run
+end to end against a real board. **BridgeAI** is summarised separately under
+[BridgeAI, the built-in option](#bridgeai-the-built-in-option): it is our own
+runner rather than an external CLI, so what it can do depends on the model and
+provider you point it at.
+
+Everything about the three apps was checked against these versions: Claude Code
+2.1.216, Codex 0.145.0, opencode 1.18.4.
 
 Only CLIs that have been run end to end against a real board are supported - see
 [How support is added](#how-support-is-added) at the end.
@@ -22,6 +30,7 @@ Only CLIs that have been run end to end against a real board are supported - see
 | The smoothest experience, everything supported | **Claude Code** |
 | To use the ChatGPT subscription you already pay for | **Codex** |
 | To choose your own model, or run one locally | **opencode** |
+| To start without installing an assistant app (bring an API key) | **BridgeAI** |
 
 ## Feature by feature
 
@@ -40,6 +49,13 @@ Only CLIs that have been run end to end against a real board are supported - see
 | Choose your own model | No | No | **Yes** |
 | Connected sources (Notion, Jira, Slack) | Yes | Yes | Yes |
 | Costs MockFlow AI credits | No | No | No |
+
+**BridgeAI** is not a column above because its abilities follow the model you
+choose rather than a fixed CLI. What is constant: its reply streams in word by
+word (like Claude Code), it uses the same board tools to draw and edit, it
+remembers earlier messages, and it never costs MockFlow AI credits. Web search
+and how attachments are handled depend on the provider and model you point it at.
+See [BridgeAI, the built-in option](#bridgeai-the-built-in-option).
 
 ## What the two "in one piece" rows mean
 
@@ -109,6 +125,28 @@ that made it.
 - Concept Builder conversations are stored in your MockFlow account, so a
   builder remembers across sessions and your teammates see the same chat.
 
+## BridgeAI, the built-in option
+
+BridgeAI comes with the bridge, so there is no separate app to install or sign
+into. Instead it connects to an AI provider with an **API key** you supply, and
+you choose which model answers. It is the quickest way to start if you don't
+already use one of the three apps above.
+
+- **Providers:** OpenRouter (easiest &mdash; one key, many models, a sensible
+  default is picked for you), Azure OpenAI, and Amazon Bedrock. Set the key, then
+  pick a model with `mockflow-bridge bridgeai model`. Full setup is in the
+  [README](README.md#using-bridgeai-no-app-to-install).
+- **What stays constant:** the reply streams in word by word, it draws and edits
+  on your board with the same tools, it remembers earlier messages, and it costs
+  no MockFlow AI credits.
+- **What depends on your choice:** whether the model can search the web, how well
+  it writes wireframe HTML, and its speed and quality all follow the model and
+  provider you point it at, not the bridge.
+- **Under the hood** it is our own runner speaking the OpenAI chat-completions
+  protocol, and it emits the same normalized events (`session`, `text`,
+  `tool-start`, `tool-end`) the three CLI adapters do, locked by the startup
+  self-test in `src/agents/health.js`.
+
 ---
 
 # Part 2: Technical comparison
@@ -119,15 +157,15 @@ These are the flags each adapter declares, which is what the orchestrator adapts
 to. Anything not supported has a fallback, so the feature degrades rather than
 breaking.
 
-| Capability | Claude Code | Codex | opencode |
-| --- | --- | --- | --- |
-| `streamsPartialText` | true | false | false |
-| `textChunks` | `block` | `block` | `block` |
-| `announcesToolsEarly` | true | only once the arguments are written | false |
-| `restrictTools` | `per-run` | `per-run` | `per-run` |
-| `resume` | `by-id` | `by-id` | `by-id` |
-| `systemPrompt` | `flag` | `config` | `config` |
-| `extraDirs` | true | false (read-only sandbox already permits reading) | false (attachments go through `-f` instead) |
+| Capability | Claude Code | Codex | opencode | BridgeAI |
+| --- | --- | --- | --- | --- |
+| `streamsPartialText` | true | false | false | true |
+| `textChunks` | `block` | `block` | `block` | `delta` |
+| `announcesToolsEarly` | true | only once the arguments are written | false | true |
+| `restrictTools` | `per-run` | `per-run` | `per-run` | `per-run` |
+| `resume` | `by-id` | `by-id` | `by-id` | `by-id` |
+| `systemPrompt` | `flag` | `config` | `config` | `config` |
+| `extraDirs` | true | false (read-only sandbox already permits reading) | false (attachments go through `-f` instead) | false (attachments read and inlined directly) |
 
 A `streamsPartialText: false` agent has its text held back until the turn ends,
 so the tab shows one honest "working" state instead of a reply that looks
@@ -229,6 +267,7 @@ agent thinking forever.
 | Claude Code | In production use, plus the full battery: chat, resumed turn, component Generate and Modify, in-place edit, attachment |
 | Codex | Full battery, live, after four adapter fixes (stdin, tool approval, resume flags, app connectors) |
 | opencode | Full battery, live, after the adapter was rewritten from observed events, including attachments (via `-f`, the prompt kept before the flag) |
+| BridgeAI | Our own OpenAI chat-completions runner; the normalized event contract it emits is locked by the startup self-test (`src/agents/health.js`). It uses the same board tools as the CLIs, but is not benchmarked per-feature here because behaviour follows the chosen model, not a fixed CLI. |
 
 ## How support is added
 

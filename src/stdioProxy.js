@@ -4,7 +4,7 @@
  * Some MCP clients only speak stdio. This shim reads newline-delimited
  * JSON-RPC from stdin and proxies each message to the running daemon's
  * POST /mcp endpoint, writing responses to stdout. The daemon must already be
- * running (npx @mockflow/mockflow-bridge) - the shim does not own the board socket, it
+ * running (mockflow-bridge) - the shim does not own the board socket, it
  * is deliberately a dumb pipe so every client shares one daemon and one set
  * of connected boards.
  */
@@ -71,7 +71,7 @@ function start() {
 					id: msg.id,
 					error: {
 						code: -32603,
-						message: 'MockFlow Bridge daemon is not running. Start it in a terminal with: npx @mockflow/mockflow-bridge'
+						message: 'MockFlow Bridge daemon is not running. Start it in a terminal with: mockflow-bridge'
 					}
 				}) + '\n');
 			}

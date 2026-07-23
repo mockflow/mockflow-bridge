@@ -107,8 +107,7 @@ module.exports = {
 		if (/please run\s*\/login/i.test(t) || /\bnot logged in\b/i.test(t)
 			|| /\binvalid api key\b/i.test(t)) {
 			return 'Claude Code is not signed in. Open a terminal, run `claude`, sign in once, '
-				+ 'then try again. If you started the bridge with `npx`, install it globally '
-				+ 'instead (`npm i -g @mockflow/mockflow-bridge`) and run `mockflow-bridge`.';
+				+ 'then start the bridge again with `mockflow-bridge`.';
 		}
 		return null;
 	},

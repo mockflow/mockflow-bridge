@@ -71,7 +71,7 @@ function notice(paint) {
 	if (!behind(config.ENGINE_VERSION, cache.latest)) return null;
 	return [
 		paint.bold('Update available') + ': ' + config.ENGINE_VERSION + ' → ' + paint.green(cache.latest),
-		paint.dim('  npm i -g ' + config.PKG_NAME + '   (or run via  npx ' + config.PKG_NAME + '@latest)')
+		paint.dim('  npm i -g ' + config.PKG_NAME)
 	];
 }
 

@@ -1,15 +1,16 @@
 # MockFlow Bridge
 
-**Use your own AI assistant to draw on your MockFlow board.**
+**Use your own AI to draw on your MockFlow board.**
 
-MockFlow Bridge is a small program you run on your own computer. It connects the
-AI assistant installed on your machine to the MockFlow board open in your
-browser, so the AI can create diagrams, wireframes, mindmaps, plans and charts
-directly on your board while you watch.
+MockFlow Bridge is a small program you run on your own computer. It connects your
+own AI to MockFlow IdeaBoard opened in your browser, so the AI can create diagrams,
+wireframes, mindmaps, plans and charts directly on your board while you watch.
 
-Two things make it different from using MockFlow AI:
+"Your own AI" can be an assistant app you already use (like Claude Code or
+Codex), or **BridgeAI** &mdash; a ready-to-go option built into the bridge that
+just needs an API key. Either way:
 
-- **It uses your AI, not ours.** The thinking happens on your machine, so it
+- **It uses your AI, not ours.** The thinking happens through your own AI, so it
   does not spend your MockFlow AI credits.
 - **Your files stay with you.** If you point it at a folder, the AI can read
   your documents to build boards from them. Those files are never uploaded.
@@ -31,9 +32,10 @@ node --version
 
 You should see a number like `v20.11.0`. Anything 18 or higher is fine.
 
-**2. One AI assistant app.** The bridge works with any of these. Pick the one
-you already pay for, or Claude Code if you have none. For the differences
-between them, see [AGENT-COMPARISON.md](AGENT-COMPARISON.md).
+**2. One AI to do the thinking.** You have two kinds of choice &mdash; pick
+whichever suits you:
+
+**Option A: an assistant app you install.** Best if you already pay for one.
 
 | Assistant | Install it with | Then sign in with |
 | --- | --- | --- |
@@ -44,14 +46,22 @@ between them, see [AGENT-COMPARISON.md](AGENT-COMPARISON.md).
 Run the install command in your terminal, then run the sign-in command once and
 follow the prompts. You only do this the first time.
 
+**Option B: BridgeAI, built in.** Nothing extra to install &mdash; BridgeAI comes
+with the bridge. Instead of an app, it uses an API key from an AI provider you
+have an account with (OpenRouter is the easiest). Best if you don't already have
+one of the apps above. Setup is a couple of extra lines &mdash; see
+[Using BridgeAI](#using-bridgeai-no-app-to-install) below.
+
+For how the assistant apps differ, see [AGENT-COMPARISON.md](AGENT-COMPARISON.md).
+
 **3. A MockFlow board** open in your browser at
 [app.mockflow.com](https://app.mockflow.com).
 
 ## Step 1: Install and start the bridge
 
-**Recommended: install it once.** This is the reliable way, especially on macOS.
-The command is shorter every time after, and your AI assistant's sign-in is
-picked up correctly:
+Install it once, then start it with the short command every time after. This is
+the reliable way, especially on macOS: it launches your AI the same way you set
+it up, so its sign-in is found.
 
 ```bash
 npm i -g @mockflow/mockflow-bridge     # once
@@ -60,19 +70,11 @@ mockflow-bridge              # every time you want to start it
 
 To update your copy later, run `npm i -g @mockflow/mockflow-bridge` again.
 
-**Quick try: no install.** This downloads and runs the latest version each time:
-
-```bash
-npx @mockflow/mockflow-bridge
-```
-
-Note: if you run it this way and your assistant replies that it is *not signed
-in* (for example "Please run /login"), install it with `npm i -g` as above and
-run `mockflow-bridge` instead. That launches your assistant in the same way you
-signed in, so its login is found.
-
 Leave this window open. It stays running and shows a **pairing code** that looks
 like `941027`. If you close the window, the connection stops.
+
+> Using BridgeAI instead of an app? Set your API key first &mdash; see
+> [Using BridgeAI](#using-bridgeai-no-app-to-install).
 
 ## Step 2: Connect your board
 
@@ -81,7 +83,7 @@ like `941027`. If you close the window, the connection stops.
 3. Type in the pairing code from your terminal.
 
 The button turns green when it works, and you will see a message confirming
-which assistant is connected. You only pair once per computer.
+which AI is connected. You only pair once per computer.
 
 ## Step 3: Ask for something
 
@@ -92,7 +94,60 @@ Type into Ask Mida as you normally would:
 - "Create a kanban board for this sprint"
 - "Add a Blocked column to that kanban"
 
-The reply and the drawing both come from your own assistant.
+The reply and the drawing both come from your own AI.
+
+## Using BridgeAI (no app to install)
+
+BridgeAI is built into the bridge. Instead of a separate app, it connects to an
+AI provider using an **API key** you already have (or can create in a couple of
+minutes). The easiest provider is **OpenRouter** &mdash; one key gives you access
+to many models, and a good default is chosen for you.
+
+**1. Get an API key.** Create one at
+[openrouter.ai](https://openrouter.ai) (or use Azure OpenAI / Amazon Bedrock if
+your company uses those &mdash; see the table below). It looks like a long string
+of letters and numbers.
+
+**2. Tell the bridge your key**, then start it, in the same terminal window:
+
+On macOS or Linux:
+
+```bash
+export OPENROUTER_API_KEY="paste-your-key-here"
+mockflow-bridge
+```
+
+On Windows (Command Prompt):
+
+```bash
+setx OPENROUTER_API_KEY "paste-your-key-here"
+```
+
+then close that window, open a new one, and run `mockflow-bridge`.
+
+That's it &mdash; BridgeAI now answers, and you pair your board exactly like
+[Step 2](#step-2-connect-your-board). With OpenRouter a sensible model is used
+automatically, so you don't have to choose one.
+
+> Tip: setting the key with `export` lasts only until you close the terminal
+> window. To avoid repeating it, add that same `export` line to your
+> `~/.zshrc` (macOS) or `~/.bashrc` (Linux) file. `setx` on Windows already
+> remembers it.
+
+**Choosing a different model (optional):**
+
+```bash
+mockflow-bridge bridgeai            # show your provider and current model
+mockflow-bridge bridgeai model      # pick from a list, or type a model name
+```
+
+**Providers BridgeAI supports:**
+
+| Provider | Key(s) to set | Notes |
+| --- | --- | --- |
+| OpenRouter | `OPENROUTER_API_KEY` | Easiest. Many models, one key. A default model is chosen for you. |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT` | For Azure customers. Your "model" is your deployment name &mdash; set it with `mockflow-bridge bridgeai model <name>`. |
+| Amazon Bedrock | `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` | For AWS customers. Pick a model with `mockflow-bridge bridgeai model`. |
 
 ## Using your own files
 
@@ -100,7 +155,7 @@ By default the AI cannot see any of your files. If you want it to read a
 folder, start the bridge like this instead:
 
 ```bash
-npx @mockflow/mockflow-bridge --workspace ~/Documents/my-project
+mockflow-bridge --workspace ~/Documents/my-project
 ```
 
 Replace the path with the folder you want it to read. Now you can ask:
@@ -111,26 +166,28 @@ Replace the path with the folder you want it to read. Now you can ask:
 Your files are read on your computer and are never uploaded to MockFlow. Only
 the drawing that appears on your board is saved.
 
-## If you have more than one assistant installed
+## If you set up more than one AI
 
-The first time you start the bridge with several installed, it asks which one
-to use and remembers your answer. To see or change it later:
+If you have several assistant apps installed (and/or BridgeAI configured), the
+first start asks which one to use and remembers your answer. To see or change it
+later:
 
 ```bash
-npx @mockflow/mockflow-bridge agent          # which are installed, which one is in use
-npx @mockflow/mockflow-bridge agent codex    # switch to that one and remember it
-npx @mockflow/mockflow-bridge agent pick     # choose from a list
-npx @mockflow/mockflow-bridge agent clear    # forget the choice (ask again next start)
+mockflow-bridge agent            # which are set up, which one is in use
+mockflow-bridge agent codex      # switch to that one and remember it
+mockflow-bridge agent bridgeai   # switch to BridgeAI
+mockflow-bridge agent pick       # choose from a list
+mockflow-bridge agent clear      # forget the choice (ask again next start)
 ```
 
 Switching takes effect immediately: if a bridge is already running, it changes
-agent in place, so you do not have to stop it or pair your board again. Open
-chats simply start a fresh conversation on the new assistant.
+the AI in place, so you do not have to stop it or pair your board again. Open
+chats simply start a fresh conversation on the new AI.
 
-To use a different agent for one run only, without changing the saved choice:
+To use a different AI for one run only, without changing the saved choice:
 
 ```bash
-npx @mockflow/mockflow-bridge --agent codex
+mockflow-bridge --agent codex
 ```
 
 They differ in small ways (web search, attachments, reading your files). See
@@ -139,15 +196,13 @@ They differ in small ways (web search, attachments, reading your files). See
 ## Everyday commands
 
 ```bash
-npx @mockflow/mockflow-bridge           # start it (leave the window open)
-npx @mockflow/mockflow-bridge status    # is it running, which boards are connected
-npx @mockflow/mockflow-bridge agent     # show / change which assistant answers
-npx @mockflow/mockflow-bridge reset     # clear saved state and start clean
-npx @mockflow/mockflow-bridge help      # all commands and options
+mockflow-bridge           # start it (leave the window open)
+mockflow-bridge status    # is it running, which boards are connected
+mockflow-bridge agent     # show / change which AI answers
+mockflow-bridge bridgeai  # show / change the BridgeAI provider and model
+mockflow-bridge reset     # clear saved state and start clean
+mockflow-bridge help      # all commands and options
 ```
-
-If you installed it with `npm i -g`, drop the `npx` and just type
-`mockflow-bridge`, `mockflow-bridge status`, and so on.
 
 To stop it, press `Ctrl + C` in the terminal window, or just close the window.
 
@@ -156,20 +211,22 @@ To stop it, press `Ctrl + C` in the terminal window, or just close the window.
 If something looks stuck or you want a clean slate:
 
 ```bash
-npx @mockflow/mockflow-bridge reset          # agent choice, attachments, cached catalog, debug dumps
-npx @mockflow/mockflow-bridge reset --all    # the above plus the MCP token and paired boards
+mockflow-bridge reset          # AI choice, attachments, cached catalog, debug dumps
+mockflow-bridge reset --all    # the above plus the MCP token and paired boards
 ```
 
 It lists what it will delete and asks before deleting anything (`--yes` skips
-the question). Plain `reset` keeps your MCP token and pairings, so your agent
-setup keeps working; `--all` means you have to re-run the `mcp add` line the
-bridge prints and pair your boards again.
+the question). Plain `reset` keeps your MCP token and pairings, so your setup
+keeps working; `--all` means you have to re-run the `mcp add` line the bridge
+prints and pair your boards again.
 
 ## If something is not working
 
 | What you see | What to do |
 | --- | --- |
-| "no supported agent CLI found" | Install one of the assistants above and sign in once. |
+| "no supported agent CLI found" | Set up one of the AIs above: install an assistant app and sign in, or configure BridgeAI with an API key. |
+| "BridgeAI needs a provider key" / "no model set" | Set an API key (e.g. `OPENROUTER_API_KEY`), then run `mockflow-bridge bridgeai model`. See [Using BridgeAI](#using-bridgeai-no-app-to-install). |
+| Your AI replies that it is *not signed in* | Sign the app in once in a terminal (e.g. run `claude`), then start the bridge again with `mockflow-bridge`. |
 | The pairing code is not accepted | Codes change each time the bridge restarts. Use the one currently shown in your terminal. |
 | The button will not turn green | Check the terminal window is still open and shows the bridge running. |
 | "Port 21196 is in use" | Another bridge is already running. Close that terminal window and try again. |
@@ -195,7 +252,7 @@ codex mcp add mockflow --url http://127.0.0.1:21196/mcp/<token>
 gemini mcp add -t http -s user mockflow http://127.0.0.1:21196/mcp/<token>
 ```
 
-Clients that only speak stdio use `npx @mockflow/mockflow-bridge stdio` as the command.
+Clients that only speak stdio use `mockflow-bridge stdio` as the command.
 
 The token gates the endpoint. Without it any local process, including any web
 page you have open, could drive your board and read data from your connected
@@ -207,7 +264,8 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | --- | --- |
 | `mockflow-bridge` | Start the daemon |
 | `mockflow-bridge status` | Running? which agent, which boards |
-| `mockflow-bridge agent [id\|pick\|clear]` | Show or change the local agent (live-switches a running bridge) |
+| `mockflow-bridge agent [id\|pick\|clear]` | Show or change the AI (live-switches a running bridge) |
+| `mockflow-bridge bridgeai [provider\|model] [id]` | Show or change the BridgeAI provider / model |
 | `mockflow-bridge reset [--all] [--yes]` | Delete saved state in `~/.mockflow` |
 | `mockflow-bridge stdio` | stdio MCP shim to a running daemon |
 | `mockflow-bridge help` | All of the above |
@@ -215,7 +273,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | Option | What it does |
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
-| `--agent <id>` | `claude`, `codex` or `opencode`, for this run only |
+| `--agent <id>` | `claude`, `codex`, `opencode` or `bridgeai`, for this run only |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
 | `MFBRIDGE_WORKSPACE` | Same as `--workspace` |
@@ -225,10 +283,24 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | `MFBRIDGE_DEV=1` | Dev mode (allow any WebSocket origin) |
 | `MFBRIDGE_DEBUG=1` | Print what each render produced (see Debugging) |
 
+**BridgeAI** (the built-in OpenAI-compatible agent) reads these:
+
+| Variable | What it does |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Enable the OpenRouter provider |
+| `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` | Enable Azure OpenAI (endpoint like `https://my-resource.openai.azure.com`) |
+| `AWS_BEARER_TOKEN_BEDROCK` + `AWS_REGION` | Enable Amazon Bedrock (Mantle) |
+| `MFBRIDGE_PROVIDER` | Force the active provider (`openrouter`, `azure`, `bedrock`) |
+| `MFBRIDGE_MODEL` | Force the model for this run |
+
+BridgeAI is only offered when at least one provider key is set, so an
+unconfigured BridgeAI never disturbs the assistant-app auto-select. Provider and
+model choices are saved in `~/.mockflow/` and reused on the next start.
+
 ## How it works
 
 ```
-Claude Code / Codex / opencode        (the brain: generates component JSON)
+Claude Code / Codex / opencode / BridgeAI   (the brain: generates component JSON)
         | MCP  (POST /mcp/<token>, or the stdio shim)
         v
 mockflow-bridge daemon                (engine: validate, map args -> gdata)
@@ -276,7 +348,7 @@ never interleave a draw.
 ## Local agent chat (Mode B)
 
 The same connection works in reverse: Ask Mida, Concept Builder and each
-component's QuickSettings AI route to the local agent instead of MockFlow's
+component's QuickSettings AI route to your own AI instead of MockFlow's
 server AI.
 
 ```
@@ -299,12 +371,13 @@ you type in Mida  ->  board socket  ->  bridge spawns the agent headless
 - One turn at a time per board. If the bridge drops mid-turn the editor falls
   back to MockFlow's server AI so the message is never lost.
 
-## Adding another agent CLI
+## Adding another agent
 
-Agents are plugins in `src/agents/`. Adding one is a single file plus a line in
-`src/agents/index.js`, and nothing else in the bridge, the editor or the server
-changes. The contract, the capability flags and the fallbacks are documented at
-the top of `src/agents/index.js`.
+Agents are plugins in `src/agents/` (Claude Code, Codex, opencode, and BridgeAI
+&mdash; our own OpenAI-compatible agent, which spawns no external binary). Adding
+one is a single file plus a line in `src/agents/index.js`, and nothing else in
+the bridge, the editor or the server changes. The contract, the capability flags
+and the fallbacks are documented at the top of `src/agents/index.js`.
 
 ## Security
 
@@ -317,7 +390,8 @@ the top of `src/agents/index.js`.
   durable token stored in `~/.mockflow/bridge-tokens.json`.
 - Connected sources are read only, so an agent cannot post to Slack or create a
   Jira issue on the user's behalf.
-- The bridge never holds MockFlow credentials or API keys.
+- The bridge never holds MockFlow credentials. Your BridgeAI provider key stays
+  in your own environment and is used only to call that provider.
 
 ## Development
 
