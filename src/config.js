@@ -82,7 +82,7 @@ module.exports = {
 	// Basic (free) plan: max live generations per local day through the bridge.
 	// A generation is one component/board actually drawn (see generationCap.js).
 	// Fixed - not user-overridable. Pro/trial users are never metered.
-	BASIC_DAILY_GEN_CAP: 2,
+	BASIC_DAILY_GEN_CAP: 30,
 	// Daily generation counter for the basic-plan cap ({ date, count }).
 	GEN_CAP_FILE: path.join(HOME_DIR, 'bridge-gencount.json'),
 
