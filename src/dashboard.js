@@ -443,7 +443,7 @@ function actLine(a) {
 	var g = a.cls === 'ok' ? C.green(a.g) : a.cls === 'err' ? C.red(a.g) : a.cls === 'run' ? C.cyan(a.g) : C.dim(a.g);
 	return ' ' + C.dim(a.t) + ' ' + g + ' ' + (a.cls === 'sys' ? C.dim(a.text) : a.text);
 }
-function pcode() { return hub.pairingCode.slice(0, 3) + '-' + hub.pairingCode.slice(3); }
+function pcode() { return hub.pairingCode; }
 function agentVersion(a) { try { return (a.detect && a.detect().version) || ''; } catch (e) { return ''; } }
 
 function hotbar(W, s) {

@@ -92,6 +92,28 @@ module.exports = {
 	},
 
 	/**
+	 * When Claude Code has no valid credentials it does not fail the turn: it
+	 * answers with a short line like "Not logged in - Please run /login", which
+	 * the board would otherwise show as Mida's reply. Recognise that so the
+	 * orchestrator can surface a real "sign in first" message instead.
+	 *
+	 * Gated on a short reply so a genuine drawing answer that happens to mention
+	 * a "/login" screen is never mistaken for the failure. Returns the message to
+	 * show, or null when the text is a normal reply.
+	 */
+	authFailureHint(text) {
+		const t = String(text || '').trim();
+		if (!t || t.length > 200) return null;
+		if (/please run\s*\/login/i.test(t) || /\bnot logged in\b/i.test(t)
+			|| /\binvalid api key\b/i.test(t)) {
+			return 'Claude Code is not signed in. Open a terminal, run `claude`, sign in once, '
+				+ 'then try again. If you started the bridge with `npx`, install it globally '
+				+ 'instead (`npm i -g @mockflow/mockflow-bridge`) and run `mockflow-bridge`.';
+		}
+		return null;
+	},
+
+	/**
 	 * How to point this CLI at the bridge when the user drives it themselves in a
 	 * terminal. (In-editor turns need none of this - agentManager passes the MCP
 	 * config per run.) Fallback only: a catalog that carries `agentWiring.claude`

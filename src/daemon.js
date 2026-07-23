@@ -343,7 +343,7 @@ async function start(opts) {
 	// synchronous startup finishes) to refresh the cache for the next start.
 	updateCheck.refresh();
 
-	console.error(ui.pairingLine(hub.pairingCode.slice(0, 3) + '-' + hub.pairingCode.slice(3),
+	console.error(ui.pairingLine(hub.pairingCode,
 		'enter this in the MockFlow editor when it asks', paint));
 	console.error('');
 	if (agents.hasWorkspace) {

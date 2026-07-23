@@ -29,6 +29,10 @@
  *   isRunnableTool(name, allowedTools, mockflowTools) -> boolean
  *   parseLine(line) -> [ {type:'session',id} | {type:'text',text}
  *                      | {type:'tool-start',id,name} | {type:'tool-end',id,ok} ]
+ *   authFailureHint(text) -> string|null   Optional. A CLI that answers a turn
+ *                    with a "sign in first" line instead of failing it can
+ *                    recognise that text here; the orchestrator then surfaces the
+ *                    returned message as the turn's error rather than as a reply.
  *
  * Capabilities are how the orchestrator adapts: it must never branch on `id`.
  * An agent that cannot restrict tools, resume a session or stream partial text

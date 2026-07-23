@@ -604,6 +604,13 @@ class AgentManager {
 
 		function finish(ok, error) {
 			if (!session.busy) return;
+			// A CLI with no valid credentials answers the turn with a short
+			// "sign in first" line instead of failing it. Turn that into a real
+			// error so the board shows how to fix it, not the cryptic line as Mida.
+			if (ok && !error && self.agent.authFailureHint) {
+				var hint = self.agent.authFailureHint(replyText || stderrTail);
+				if (hint) { ok = false; error = hint; replyText = ''; }
+			}
 			session.busy = false;
 			session.proc = null;
 			hub.selectedProjectId = prevSelected;

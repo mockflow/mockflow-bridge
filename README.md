@@ -49,26 +49,30 @@ follow the prompts. You only do this the first time.
 
 ## Step 1: Install and start the bridge
 
-You have two ways to run it. Both are fine, pick one.
-
-**Option A: no install (simplest).** This downloads and runs the latest version
-each time:
-
-```bash
-npx @mockflow/mockflow-bridge
-```
-
-**Option B: install it once.** Then the command is shorter every time after:
+**Recommended: install it once.** This is the reliable way, especially on macOS.
+The command is shorter every time after, and your AI assistant's sign-in is
+picked up correctly:
 
 ```bash
 npm i -g @mockflow/mockflow-bridge     # once
 mockflow-bridge              # every time you want to start it
 ```
 
-To update an installed copy later, run `npm i -g @mockflow/mockflow-bridge` again.
+To update your copy later, run `npm i -g @mockflow/mockflow-bridge` again.
+
+**Quick try: no install.** This downloads and runs the latest version each time:
+
+```bash
+npx @mockflow/mockflow-bridge
+```
+
+Note: if you run it this way and your assistant replies that it is *not signed
+in* (for example "Please run /login"), install it with `npm i -g` as above and
+run `mockflow-bridge` instead. That launches your assistant in the same way you
+signed in, so its login is found.
 
 Leave this window open. It stays running and shows a **pairing code** that looks
-like `941-027`. If you close the window, the connection stops.
+like `941027`. If you close the window, the connection stops.
 
 ## Step 2: Connect your board
 
