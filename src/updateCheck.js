@@ -110,4 +110,13 @@ function refresh() {
 	} catch (e) { finish(); }
 }
 
-module.exports = { notice, refresh, behind };
+/** { current, latest } when an update is available, else null. For the dashboard. */
+function available() {
+	if (disabled()) return null;
+	const cache = readCache();
+	if (!cache || !cache.latest) return null;
+	if (!behind(config.ENGINE_VERSION, cache.latest)) return null;
+	return { current: config.ENGINE_VERSION, latest: cache.latest };
+}
+
+module.exports = { notice, refresh, behind, available };

@@ -240,6 +240,40 @@ async function start(opts) {
 
 	const endpoint = 'http://' + config.HOST + ':' + config.PORT;
 	const paint = ui.err;
+
+	// Agent health for the picked agent — computed once, used by dashboard + banner.
+	const agentHealth = require('./agents/health');
+	const healthProblems = picked.agent
+		? agentHealth.problems([agentHealth.checkOne(picked.agent)])
+		: [];
+	const updateCheck = require('./updateCheck');
+
+	function shutdown() {
+		log('Shutting down');
+		agents.clearAllAttachments();
+		hub.stop();
+		server.close();
+		removePortFile();
+		process.exit(0);
+	}
+	process.on('SIGINT', shutdown);
+	process.on('SIGTERM', shutdown);
+
+	// Full-screen dashboard in a real terminal (best for non-devs); plain banner +
+	// line output only when piped, in CI, or headless. In DEBUG the dashboard stays
+	// on and captures the render dumps into its scrolling Activity feed.
+	const useDashboard = !!(process.stdout.isTTY && process.stderr.isTTY)
+		&& !process.env.MFBRIDGE_NO_UI && !(opts && opts.noUi);
+	if (useDashboard) {
+		updateCheck.refresh();
+		require('./dashboard').start({
+			hub: hub, agents: agents, registry: agentRegistry, config: config,
+			endpoint: endpoint, mcpToken: mcpToken, healthProblems: healthProblems,
+			onQuit: shutdown
+		});
+		return { server: server, hub: hub, mcp: mcp };
+	}
+
 	console.error('');
 	console.error(ui.banner(config.ENGINE_VERSION, paint));
 	console.error('');
@@ -263,16 +297,6 @@ async function start(opts) {
 	], paint));
 	console.error('');
 
-	// Agent health for the agent that will actually answer turns (picked.agent) -
-	// no point probing a Codex the user is not using. Cheapest signal first: a
-	// capability probe (which flags this installed CLI is missing, and what that
-	// costs), a version floor (newer than the version we verified against) and a
-	// parser canary (a regression in our own code). Silent when all is well; a box
-	// only when something needs the user's attention.
-	const agentHealth = require('./agents/health');
-	const healthProblems = picked.agent
-		? agentHealth.problems([agentHealth.checkOne(picked.agent)])
-		: [];
 	if (healthProblems.length) {
 		const lines = [];
 		healthProblems.forEach(function (p) {
@@ -300,10 +324,7 @@ async function start(opts) {
 		console.error('');
 	}
 
-	// "You are behind the published version" - read from a cache a previous run
-	// left, so this is instant and offline-safe. The network refresh below runs
-	// after the banner and only feeds the next start.
-	const updateCheck = require('./updateCheck');
+	// "You are behind the published version" - read from a cache a previous run left.
 	const updateLines = updateCheck.notice(paint);
 	if (updateLines) {
 		console.error(ui.noticeBox('⬆ mockflow-bridge update', updateLines, paint.teal, paint));
@@ -351,17 +372,6 @@ async function start(opts) {
 		+ paint.dim('  ·  ') + paint.teal('agent') + paint.dim(' (switch agent)')
 		+ paint.dim('  ·  ') + paint.teal('reset'));
 	console.error('');
-
-	function shutdown() {
-		log('Shutting down');
-		agents.clearAllAttachments();
-		hub.stop();
-		server.close();
-		removePortFile();
-		process.exit(0);
-	}
-	process.on('SIGINT', shutdown);
-	process.on('SIGTERM', shutdown);
 
 	return { server: server, hub: hub, mcp: mcp };
 }

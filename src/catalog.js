@@ -75,7 +75,7 @@ async function fetchRemote() {
 async function load() {
 	try {
 		const registry = await fetchRemote();
-		log('Catalog: loaded from ' + config.CATALOG_URL + ' (' + registry.length + ' entries)');
+		log('Catalog: loaded');
 		warnIfEngineOld(registry);
 		return { registry: registry, source: 'remote' };
 	} catch (err) {
@@ -86,7 +86,7 @@ async function load() {
 		if (fs.existsSync(config.CATALOG_CACHE_FILE)) {
 			const registry = requireFresh(config.CATALOG_CACHE_FILE);
 			if (validateRegistry(registry)) {
-				log('Catalog: loaded from cache (' + registry.length + ' entries)');
+				log('Catalog: loaded from cache');
 				warnIfEngineOld(registry);
 				return { registry: registry, source: 'cache' };
 			}
