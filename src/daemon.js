@@ -21,14 +21,23 @@ const ui = require('./ui');
 const catalogLoader = require('./catalog');
 const BoardHub = require('./boardHub');
 const McpEndpoint = require('./mcpEndpoint');
+const GenerationCap = require('./generationCap');
 
 async function start(opts) {
 	const loaded = await catalogLoader.load();
 	const hub = new BoardHub({ log: log });
+	// Basic-plan daily generation cap. Only draws targeting a basic board are
+	// metered (mcpEndpoint checks hub.isTargetBasic); Pro/trial users are not.
+	const genCap = new GenerationCap({ log: log });
+	// The hub reports the running count to basic tabs (register snapshot + a live
+	// gen-usage frame after each draw) so the editor can warn as it runs low,
+	// mirroring the AI-credits balance UI.
+	hub.genCap = genCap;
 	const mcp = new McpEndpoint({
 		registry: loaded.registry,
 		catalogSource: loaded.source,
 		hub: hub,
+		genCap: genCap,
 		log: log
 	});
 

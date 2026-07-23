@@ -129,7 +129,24 @@ class McpEndpoint {
 		this.registry = opts.registry;
 		this.catalogSource = opts.catalogSource;
 		this.hub = opts.hub;
+		this.genCap = opts.genCap || null;
 		this.log = opts.log || function() {};
+	}
+
+	/**
+	 * Count one basic-plan generation and push the updated usage to the board tab.
+	 * The bridge only MEASURES the daily cap - it never blocks. The editor reads the
+	 * usage and does the prevention itself, the same way it gates on AI credits.
+	 */
+	_recordGen(projectid) {
+		if (!this.genCap) return;
+		const count = this.genCap.record();
+		const remaining = this.genCap.remaining();
+		if (remaining <= 0)
+			this.log('Basic plan: daily local generation limit reached (' + count + '/' + this.genCap.limit + ') - further generations run on MockFlow AI until it resets tomorrow.');
+		else
+			this.log('Basic plan: local generation ' + count + '/' + this.genCap.limit + ' (' + remaining + ' left today).');
+		this.hub.notifyGenUsage(projectid || null);
 	}
 
 	async handle(method, params) {
@@ -275,6 +292,13 @@ class McpEndpoint {
 			const entry = this._entry(name);
 			if (!entry) return this._err('Unknown tool: ' + name);
 
+			// Basic-plan daily generation cap is MEASURED here, never enforced: the
+			// bridge counts every draw a basic board makes - including component
+			// Create/Modify AI, which fills in place (a capture) but is still a
+			// generation - and reports the running usage to the editor, which does the
+			// prevention itself (like AI credits). Pro/trial boards are not metered.
+			const meter = this.hub.isTargetBasic(args._projectid || null);
+
 			// Debug tracing: print/dump what the agent generated for this render (see debug.js).
 			debug.toolCall(name, args);
 
@@ -285,6 +309,8 @@ class McpEndpoint {
 				// result - the bridge only relays the args (see boardHub.drawHtml).
 				const mcpType = name.replace('render_', '');
 				const hres = await this.hub.drawHtml(args._projectid || null, name, mcpType, args);
+				// A wireframelite/prototypelite render always draws - count it for basic plans.
+				if (meter) this._recordGen(args._projectid || null);
 				// Conversion report from the tab (component/chart/icon counts + warnings). It
 				// goes back to the AGENT too: a sparse or icon-less render is something the
 				// agent can fix by regenerating the HTML, but only if it is told.
@@ -322,6 +348,10 @@ class McpEndpoint {
 			// the gdata fills the component the user is editing instead of drawing
 			// a new one (fill-in-place). Otherwise it draws normally.
 			const res = await this.hub.captureOrDraw(args._projectid || null, name, gdata);
+
+			// Count the draw against the basic-plan cap - whether it drew a new
+			// component or filled one in place (capture). Both are a generation.
+			if (meter) this._recordGen(args._projectid || null);
 
 			const type = name.replace('render_', '');
 			if (res && res.captured) {

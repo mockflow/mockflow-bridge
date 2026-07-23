@@ -79,6 +79,13 @@ module.exports = {
 	BRIDGEAI_PROVIDER_FILE: path.join(HOME_DIR, 'bridge-provider'),
 	BRIDGEAI_MODEL_FILE: path.join(HOME_DIR, 'bridge-model.json'),
 
+	// Basic (free) plan: max live generations per local day through the bridge.
+	// A generation is one component/board actually drawn (see generationCap.js).
+	// Fixed - not user-overridable. Pro/trial users are never metered.
+	BASIC_DAILY_GEN_CAP: 2,
+	// Daily generation counter for the basic-plan cap ({ date, count }).
+	GEN_CAP_FILE: path.join(HOME_DIR, 'bridge-gencount.json'),
+
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,
 	// schemas and mapping rules are fetched from MockFlow at startup so new AI
 	// components ship without an npm publish. The fetched copy is cached locally;

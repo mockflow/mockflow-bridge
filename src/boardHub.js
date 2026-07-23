@@ -301,10 +301,13 @@ class BoardHub {
 	_agentInfoFor(tab) {
 		var info = this.agentInfo || null;
 		if (!info || !tab || !tab.isBasic) return info;
-		if (!info.hasWorkspace && !info.workspaceName) return info;
 		var clone = Object.assign({}, info);
+		// Workspace file reading is Pro-only: tell a basic tab files are off.
 		clone.hasWorkspace = false;
 		clone.workspaceName = null;
+		// Seed the editor with the current daily generation usage so it can gate
+		// (and warn as it runs low) from the first turn, like the AI-credit balance.
+		clone.genUsage = this._genUsage();
 		return clone;
 	}
 
@@ -312,6 +315,27 @@ class BoardHub {
 	isTargetBasic(projectid) {
 		try { return !!this._targetTab(projectid || null).tab.isBasic; }
 		catch (e) { return false; }
+	}
+
+	/**
+	 * The basic-plan daily generation usage the editor gates on (like AI credits):
+	 * { limit, used, remaining }. Null when there is no cap wired. The bridge only
+	 * measures this - the editor does the prevention.
+	 */
+	_genUsage() {
+		if (!this.genCap) return null;
+		const remaining = this.genCap.remaining();
+		return { limit: this.genCap.limit, used: Math.max(0, this.genCap.limit - remaining), remaining: remaining };
+	}
+
+	/** Push the current generation usage to the targeted board tab (best effort). */
+	notifyGenUsage(projectid) {
+		const usage = this._genUsage();
+		if (!usage) return;
+		try {
+			const target = this._targetTab(projectid || null);
+			this._send(target.ws, { t: 'gen-usage', usage: usage });
+		} catch (e) {}
 	}
 
 	// ---- board targeting -----------------------------------------------------

@@ -26,8 +26,11 @@ const ALT_ON = E + '?1049h', ALT_OFF = E + '?1049l';
 const CUR_HIDE = E + '?25l', CUR_SHOW = E + '?25h';
 const HOME = E + 'H', CLR_BELOW = E + '0J';
 const WRAP_OFF = E + '?7l', WRAP_ON = E + '?7h';   // auto-wrap off while we own the screen (keeps the header fixed)
-const MOUSE_ON = E + '?1000h' + E + '?1006h';   // SGR mouse tracking — deliver wheel events to the app (opencode-style)
-const MOUSE_OFF = E + '?1006l' + E + '?1000l';
+// ?1002h = button-event tracking: press, release, wheel AND motion-while-a-button-
+// is-held (drag). ?1000h alone omits the drag reports, so a selection could never
+// grow past its first line. ?1006h = SGR encoding.
+const MOUSE_ON = E + '?1002h' + E + '?1006h';
+const MOUSE_OFF = E + '?1006l' + E + '?1002l';
 
 const ON = ui.out.enabled;
 const RESET = E + '0m';
@@ -92,6 +95,15 @@ let healthWarn = null;
 let modelState = null;           // { loading, list, err } while the model picker is open
 let tick = null, active = false;
 let screenWrite = null, origOut = null, origErr = null, capBuf = '';
+// Copy-on-select over the Activity feed (opencode-style): mouse capture stays on
+// (so the wheel still scrolls), and we do the selection ourselves - drag over the
+// feed to highlight lines, and on release the text is copied to the system
+// clipboard via OSC 52 (works over SSH too). `y` yanks the whole feed.
+// feedTop/feedStartI/feedCount map a screen row to an activity line; sel* hold the
+// live line selection as absolute indices into `activity`.
+let feedTop = 0, feedStartI = 0, feedCount = 0;
+let selecting = false, selAnchor = 0, selHead = 0;
+let copiedMsg = '', copiedTimer = null;   // transient "✓ copied" note in the ACTIVITY header
 
 // The bridge mark. Box-drawing line chars sit at the cell's vertical center, so it
 // reads a touch low next to baseline text — an accepted font-metrics tradeoff.
@@ -142,22 +154,80 @@ function boardIds() { return hub.listBoards().map(function (b) { return b.projec
 /** Write to the real screen (bypasses the capture below). */
 function scr(s) { (screenWrite || process.stdout.write.bind(process.stdout))(s); }
 
-/** Parse SGR mouse reports (\x1b[<b;x;yM) for wheel up/down and scroll the pane.
- *  Button 64 = wheel up (older), 65 = wheel down (newer). Other buttons ignored. */
+/** Parse SGR mouse reports: `\x1b[<b;x;y M` (press/motion) or `...m` (release).
+ *  Button 64/65 = wheel up/down; 0 = left press; 32 = left drag; release ends a
+ *  selection. Anything else ignored. Coordinates are 1-based. */
 function onMouseData(buf) {
 	try {
 		var s = buf.toString('latin1');
-		var re = /\x1b\[<(\d+);\d+;\d+M/g, m;
+		var re = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, m;
 		while ((m = re.exec(s))) {
-			var b = parseInt(m[1], 10);
+			var b = parseInt(m[1], 10), y = parseInt(m[3], 10), press = m[4] === 'M';
 			if (b === 64) wheel(-1);
 			else if (b === 65) wheel(1);
+			else if (b === 0 && press) selStart(y);
+			else if (b === 32 && press) selDrag(y);
+			else if (!press) selEnd();
 		}
 	} catch (e) {}
 }
 function wheel(dir) {
 	if (!active || mode !== 'dashboard') return;
 	scrollOff = dir < 0 ? scrollOff + 3 : Math.max(0, scrollOff - 3);   // 3 lines per notch
+	render();
+}
+
+/** Screen row (1-based) -> absolute activity index, or -1 if the row is not a feed line. */
+function rowToActivity(y) {
+	var li = (y - 1) - feedTop;
+	if (li < 0 || li >= feedCount) return -1;
+	return feedStartI + li;
+}
+function selStart(y) {
+	if (!active || mode !== 'dashboard') return;
+	var idx = rowToActivity(y);
+	if (idx < 0) return;
+	selecting = true; selAnchor = selHead = idx; render();
+}
+function selDrag(y) {
+	if (!selecting) return;
+	var li = Math.max(0, Math.min(feedCount - 1, (y - 1) - feedTop));
+	selHead = feedStartI + li; render();
+}
+function selEnd() {
+	if (!selecting) return;
+	selecting = false;
+	var lo = Math.min(selAnchor, selHead), hi = Math.max(selAnchor, selHead);
+	var text = activity.slice(lo, hi + 1).map(function (a) {
+		return (a.t + ' ' + a.g + ' ' + a.text).replace(ANSI_RE, '').replace(/\s+$/, '');
+	}).join('\n');
+	copyToClipboard(text, (hi - lo + 1));
+	render();
+}
+/** yank the whole feed to the clipboard (opencode-style keyboard copy). */
+function yankFeed() {
+	var text = activity.map(function (a) {
+		return (a.t + ' ' + a.g + ' ' + a.text).replace(ANSI_RE, '').replace(/\s+$/, '');
+	}).join('\n');
+	copyToClipboard(text, activity.length);
+}
+/** Copy to the system clipboard via OSC 52 - no native clipboard dep, works over SSH.
+ *  Confirmation shows briefly in the ACTIVITY header, NOT as a feed line (which would
+ *  land in the very text being copied). */
+function copyToClipboard(text, n) {
+	if (!text) return;
+	try {
+		var b64 = Buffer.from(String(text), 'utf8').toString('base64');
+		scr('\x1b]52;c;' + b64 + '\x07');
+		flashCopied('✓ copied ' + n + ' line' + (n === 1 ? '' : 's'));
+	} catch (e) {
+		flashCopied('copy failed');
+	}
+}
+function flashCopied(msg) {
+	copiedMsg = msg;
+	clearTimeout(copiedTimer);
+	copiedTimer = setTimeout(function () { copiedMsg = ''; if (active) render(); }, 2000);
 	render();
 }
 
@@ -346,11 +416,21 @@ function dash(W, H) {
 	if (scrollOff > maxOff) scrollOff = maxOff;               // clamp to valid range
 	var end = activity.length - scrollOff;
 	var startI = Math.max(0, end - avail);
-	var hdr = ' ' + C.dim('ACTIVITY');
+	var hdr = ' ' + C.dim('ACTIVITY') + (copiedMsg ? '   ' + C.green(copiedMsg) : C.dim('   drag to copy · y to copy all'));
 	if (scrollOff > 0) hdr += '   ' + C.amber('↑ ' + scrollOff + ' newer below · End to follow');
 	out.push(hdr);
 	out.push(rule(W));
-	activity.slice(startI, end).forEach(function (a) { out.push(actLine(a)); });
+	// Record the feed's on-screen position so mouse rows map back to activity lines
+	// (each out[] entry is painted at row index+1; see render()).
+	feedTop = out.length; feedStartI = startI; feedCount = end - startI;
+	var selLo = Math.min(selAnchor, selHead), selHi = Math.max(selAnchor, selHead);
+	activity.slice(startI, end).forEach(function (a, li) {
+		var absIdx = startI + li;
+		if (selecting && absIdx >= selLo && absIdx <= selHi)
+			out.push('\x1b[7m' + clip(actLine(a).replace(ANSI_RE, ''), W) + '\x1b[27m');   // reverse-video = selected
+		else
+			out.push(actLine(a));
+	});
 	while (out.length < H - footRows) out.push('');
 
 	out.push('');
@@ -422,6 +502,7 @@ function helpBody() {
 		'   ' + C.cyan('a') + ' switch AI agent      ' + C.cyan('b') + ' switch board',
 		'   ' + C.cyan('p') + ' provider (BridgeAI)   ' + C.cyan('m') + ' model (BridgeAI)',
 		'   ' + C.cyan('d') + ' connection details    ' + C.cyan('q') + ' stop the bridge',
+		'   ' + C.cyan('drag') + ' select+copy lines   ' + C.cyan('y') + ' copy whole feed',
 		'   ' + C.cyan('↑↓ PgUp PgDn') + ' scroll activity   ' + C.cyan('End') + ' follow live',
 		'', ' ' + C.bold('Update')
 	];
@@ -504,6 +585,7 @@ function onKey(str, key) {
 			case 'p': if (s.agentOK && s.isBai) return openProvider(); return;
 			case 'm': if (s.agentOK && s.isBai) return openModel(); return;
 			case 'b': if (s.boards.length > 1) return openBoard(); return;
+			case 'y': return yankFeed();
 			case 'd': mode = 'details'; return render();
 			case '?': case 'h': mode = 'help'; return render();
 			case 'q': mode = 'quit'; return render();
