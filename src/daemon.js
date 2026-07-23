@@ -262,6 +262,57 @@ async function start(opts) {
 			: paint.dim('off - set MFBRIDGE_DEBUG=1 to trace what each render generates')]
 	], paint));
 	console.error('');
+
+	// Agent health for the agent that will actually answer turns (picked.agent) -
+	// no point probing a Codex the user is not using. Cheapest signal first: a
+	// capability probe (which flags this installed CLI is missing, and what that
+	// costs), a version floor (newer than the version we verified against) and a
+	// parser canary (a regression in our own code). Silent when all is well; a box
+	// only when something needs the user's attention.
+	const agentHealth = require('./agents/health');
+	const healthProblems = picked.agent
+		? agentHealth.problems([agentHealth.checkOne(picked.agent)])
+		: [];
+	if (healthProblems.length) {
+		const lines = [];
+		healthProblems.forEach(function (p) {
+			if (p.kind === 'capability') {
+				if (p.helpFailed) {
+					lines.push(paint.bold(p.label + ' — could not read its --help') + '; the CLI invocation may have changed.');
+				}
+				(p.critical || []).forEach(function (c) {
+					lines.push(paint.bold(p.label + ' — turns will draw nothing') + ': ' + c.label
+						+ paint.dim(' (' + c.needle + ' missing)'));
+				});
+				(p.degraded || []).forEach(function (d) {
+					lines.push(p.label + ': ' + d.label + ' unavailable' + paint.dim(' (' + d.needle + ' missing)'));
+				});
+			} else if (p.kind === 'version') {
+				lines.push(paint.bold(p.label + ' ' + p.installed) + ' is newer than the tested '
+					+ p.tested + '.');
+				lines.push(paint.dim('  Turns may misbehave; re-run test/fake-*.js, then bump testedVersion.'));
+			} else {
+				lines.push(paint.bold(p.label) + ' parser canary failed:');
+				p.failures.forEach(function (f) { lines.push(paint.dim('  ' + f)); });
+			}
+		});
+		console.error(ui.noticeBox('⚠ Agent check', lines, paint.yellow, paint));
+		console.error('');
+	}
+
+	// "You are behind the published version" - read from a cache a previous run
+	// left, so this is instant and offline-safe. The network refresh below runs
+	// after the banner and only feeds the next start.
+	const updateCheck = require('./updateCheck');
+	const updateLines = updateCheck.notice(paint);
+	if (updateLines) {
+		console.error(ui.noticeBox('⬆ mockflow-bridge update', updateLines, paint.teal, paint));
+		console.error('');
+	}
+	// Fire-and-forget: schedules one HTTPS GET on the event loop (after this
+	// synchronous startup finishes) to refresh the cache for the next start.
+	updateCheck.refresh();
+
 	console.error(ui.pairingLine(hub.pairingCode.slice(0, 3) + '-' + hub.pairingCode.slice(3),
 		'enter this in the MockFlow editor when it asks', paint));
 	console.error('');

@@ -48,6 +48,7 @@ if (process.env.MFBRIDGE_ALLOWED_ORIGINS) {
 
 module.exports = {
 	ENGINE_VERSION: require('../package.json').version,
+	PKG_NAME: require('../package.json').name,
 
 	HOST: '127.0.0.1',
 	PORT: parseInt(process.env.MFBRIDGE_PORT || String(DEFAULT_PORT), 10),
@@ -70,6 +71,9 @@ module.exports = {
 	// Session-scoped chat attachments, one folder per board (agentManager.js).
 	ATTACHMENTS_DIR: path.join(HOME_DIR, 'attachments'),
 	CATALOG_CACHE_FILE: path.join(HOME_DIR, 'bridge-catalog-cache.js'),
+	// Last-known latest version on npm, written by a background check (updateCheck.js)
+	// so the "you are behind" notice is instant and offline-safe on the next start.
+	UPDATE_CACHE_FILE: path.join(HOME_DIR, 'bridge-update-check.json'),
 
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,
 	// schemas and mapping rules are fetched from MockFlow at startup so new AI

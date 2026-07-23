@@ -38,6 +38,29 @@ module.exports = {
 	id: 'claude',
 	label: 'Claude Code',
 
+	// The CLI version this adapter's flags and parser were last verified against
+	// on a real board. detect() reads the installed version; agents/health.js
+	// warns at startup when it is newer. Bump this after re-running test/fake-*.js.
+	testedVersion: '2.1.216',
+
+	// Flags a turn depends on, checked against `claude --help` at startup
+	// (agents/health.js). Needles verified present in 2.1.216 - not guessed.
+	// Critical = generation produces nothing; optional = a feature is lost.
+	capabilityProbe: {
+		bin: BIN,
+		help: ['--help'],
+		requires: [
+			{ needle: '--output-format', critical: true, label: 'stream-json output (the bridge cannot read a turn without it)' },
+			{ needle: '--mcp-config', critical: true, label: 'MCP wiring (without it the agent has no board tools)' },
+			{ needle: '--print', critical: true, label: 'headless prompt mode (-p)' },
+			{ needle: '--allowedTools', critical: false, label: 'per-turn tool allowlist' },
+			{ needle: '--append-system-prompt', critical: false, label: 'persona / system prompt' },
+			{ needle: '--add-dir', critical: false, label: 'attachments & workspace file reading' },
+			{ needle: '--resume', critical: false, label: 'multi-turn session memory' },
+			{ needle: '--include-partial-messages', critical: false, label: 'live drawing progress' }
+		]
+	},
+
 	/**
 	 * What the orchestrator may rely on. Anything false here has a documented
 	 * fallback in agentManager, so a weaker CLI degrades instead of breaking.
@@ -181,5 +204,26 @@ module.exports = {
 			}
 		}
 		return out;
+	},
+
+	/**
+	 * Committed fixtures for the startup canary (agents/health.js). Each line is a
+	 * real stream-json shape; `expect` is the normalized events it must still
+	 * produce, in order. If a parseLine edit stops honouring one of these, boot
+	 * fails loudly instead of a turn drawing nothing.
+	 */
+	selfTest: {
+		lines: [
+			{ line: '{"type":"system","subtype":"init","session_id":"sess_abc","model":"claude-opus-4-8"}',
+				expect: ['session', 'model'] },
+			{ line: '{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"Hello"}]}}',
+				expect: ['model', 'text'] },
+			{ line: '{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"tu_1","name":"mcp__mockflow__render_wireframelite"}]}}',
+				expect: ['model', 'tool-start'] },
+			{ line: '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_1","name":"mcp__mockflow__render_wireframelite"}}}',
+				expect: ['tool-start'] },
+			{ line: '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","is_error":false}]}}',
+				expect: ['tool-end'] }
+		]
 	}
 };

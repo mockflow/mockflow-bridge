@@ -87,6 +87,31 @@ module.exports = {
 	id: 'opencode',
 	label: 'opencode',
 
+	// The CLI version this adapter's injected config schema, arg ordering and
+	// stderr log format were last verified against on a real board. agents/health.js
+	// warns at startup when the installed opencode is newer - this adapter leans on
+	// the widest, softest surface of the three. Bump after re-running test/fake-*.js.
+	testedVersion: '1.18.4',
+
+	// Flags a turn depends on, checked against `opencode run --help` at startup
+	// (agents/health.js). Needles verified present in 1.18.4 - not guessed. If the
+	// `run` subcommand itself is gone the help call fails and that is flagged too.
+	capabilityProbe: {
+		bin: BIN,
+		help: ['run', '--help'],
+		requires: [
+			{ needle: '--format', critical: true, label: 'json event output' },
+			{ needle: '--agent', critical: true, label: 'the per-turn agent definition (carries the MCP server and tool allowlist)' },
+			{ needle: '--print-logs', critical: false, label: 'the model label (read from stderr)' },
+			{ needle: '--session', critical: false, label: 'session memory' },
+			{ needle: '--file', critical: false, label: 'attachments' }
+		],
+		// The MCP server, permissions and tool allowlist ride the
+		// OPENCODE_CONFIG_CONTENT env schema, which --help does not describe. Only a
+		// live turn catches a schema drift - and a denied board tool draws nothing.
+		blindSpots: ['OPENCODE_CONFIG_CONTENT: mcp / agent / permission / tools schema']
+	},
+
 	capabilities: {
 		// `run --format json` emits a whole assistant message as one `text` event.
 		// There is no token-level delta on this stream, so a reply lands in one
@@ -253,5 +278,38 @@ module.exports = {
 			}
 		}
 		return out;
+	},
+
+	/**
+	 * Committed fixtures for the startup canary (agents/health.js). Beyond the
+	 * event and stderr shapes, `check` re-derives the injected tool allowlist and
+	 * asserts it still exposes at least one `mockflow_*` board tool - the silent
+	 * failure this adapter is most exposed to (a prefix or `{"*":false}`-default
+	 * drift denies every board tool and the turn draws nothing without an error).
+	 */
+	selfTest: {
+		lines: [
+			{ line: '{"type":"step_start","sessionID":"ses_1","part":{}}',
+				expect: ['session'] },
+			{ line: '{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"Hello"}}',
+				expect: ['session', 'text'] },
+			{ line: '{"type":"tool_use","sessionID":"ses_1","part":{"type":"tool","tool":"read","callID":"read_0","state":{"status":"completed"}}}',
+				expect: ['session', 'tool-start', 'tool-end'] }
+		],
+		stderr: [
+			{ line: 'INFO service=session agent=mfbridge sessionID=ses_1 modelID=anthropic/claude-opus-4-8 provider=anthropic',
+				expect: 'model' },
+			// The throwaway title generator names a different, smaller model and must
+			// be ignored - if this stops being filtered the board mislabels the model.
+			{ line: 'INFO service=session agent=title small=true modelID=anthropic/claude-haiku',
+				expect: null }
+		],
+		check: function () {
+			const map = toolMap('mcp__mockflow__*', ['render_wireframelite', 'render_prototypelite']);
+			const exposesBoard = Object.keys(map).some(function (k) {
+				return k.indexOf('mockflow_') === 0 && map[k] === true;
+			});
+			return exposesBoard ? '' : 'injected allowlist exposes no mockflow_* board tools';
+		}
 	}
 };

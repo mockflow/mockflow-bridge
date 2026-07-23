@@ -92,6 +92,31 @@ module.exports = {
 	id: 'codex',
 	label: 'Codex',
 
+	// The CLI version the `-c` config keys and the event envelope below were
+	// confirmed against (see the file header). agents/health.js warns at startup
+	// when the installed codex is newer. Bump after re-running test/fake-*.js.
+	testedVersion: '0.145.0',
+
+	// Flags a turn depends on, checked against `codex exec --help` at startup
+	// (agents/health.js). Needles verified present in 0.145.0 - not guessed.
+	capabilityProbe: {
+		bin: BIN,
+		help: ['exec', '--help'],
+		requires: [
+			{ needle: '--json', critical: true, label: 'JSON event stream (the bridge cannot read a turn without it)' },
+			{ needle: '--config', critical: true, label: 'the -c config transport (all MCP and sandbox wiring rides it)' },
+			{ needle: '--skip-git-repo-check', critical: true, label: 'the git-repo bypass (every turn passes it; its removal errors the run)' },
+			{ needle: 'resume', critical: false, label: 'session memory (exec resume)' }
+		],
+		// These ride `-c key=value`, not flags, so --help cannot confirm them. Only a
+		// live turn catches a renamed key - and a broken one draws into the wrong
+		// place while reporting success (see the file header).
+		blindSpots: [
+			'mcp_servers.mockflow.url', 'sandbox_mode="read-only"',
+			'mcp_servers.mockflow.default_tools_approval_mode', 'features.apps'
+		]
+	},
+
 	capabilities: {
 		// item.completed carries a whole agent message; there is no token-level
 		// delta on this stream, so a reply lands in one piece.
@@ -249,5 +274,25 @@ module.exports = {
 			}
 		}
 		return out;
+	},
+
+	/**
+	 * Committed fixtures for the startup canary (agents/health.js). The thread and
+	 * agent_message shapes are confirmed (file header); the two tool fixtures
+	 * encode the *assumed* tool-item shape the parser reads (the capture run called
+	 * no tools), so the canary also documents that assumption - if a codex update
+	 * moves it, boot flags the mismatch instead of a tool row silently vanishing.
+	 */
+	selfTest: {
+		lines: [
+			{ line: '{"type":"thread.started","thread_id":"thr_1"}',
+				expect: ['session'] },
+			{ line: '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hi!"}}',
+				expect: ['text'] },
+			{ line: '{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"render_wireframelite"}}',
+				expect: ['tool-start'] },
+			{ line: '{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","tool":"render_wireframelite","status":"completed"}}',
+				expect: ['tool-start', 'tool-end'] }
+		]
 	}
 };
