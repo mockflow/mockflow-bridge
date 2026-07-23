@@ -35,7 +35,8 @@ Only CLIs that have been run end to end against a real board are supported - see
 | Remembers earlier messages | Yes | Yes | Yes |
 | Reads a folder you point it at | Yes | Yes | Yes |
 | Attachments (files, images) | Yes | Yes | Yes |
-| **Web search** | **On** | **Off by default** | Fetch only, depends on your setup |
+| Fetch a web page you name | Yes | Yes | Yes |
+| General web search (no URL) | Yes, live | Yes, live | No, fetch only |
 | Choose your own model | No | No | **Yes** |
 | Connected sources (Notion, Jira, Slack) | Yes | Yes | Yes |
 | Costs MockFlow AI credits | No | No | No |
@@ -51,21 +52,51 @@ reply arrives with it. On Claude Code the reply types itself out and the
 This is a property of the CLIs, not a setting. Nothing is lost either way: the
 same board is drawn.
 
-## What the web search row means
+## What the two web rows mean
 
 When you ask for something that depends on current facts (live prices, recent
-events, real companies), the assistant may look it up first.
+events, real companies), the assistant may look it up first. There are two
+different abilities here, and they were tested by giving each agent a real turn.
 
-- **Claude Code**: searching and page fetching are both switched on for chat
-  turns, so it can research before it draws.
-- **Codex**: web search defaults to a cached index rather than live browsing.
-  Live search is a setting we can turn on per turn, which we currently do not.
-- **opencode**: it can fetch a page you name, but general web search depends on
-  what you have configured in opencode itself.
+**Fetching a page you name** works on all three. Given a URL, each one retrieves
+it and reads the content (Claude Code's `WebFetch`, opencode's `webfetch`, and
+Codex's built-in fetch).
+
+**General web search - finding pages without a URL - differs:**
+
+- **Claude Code**: has a live `WebSearch` tool, on for chat turns. Asked for a
+  current fact it searches and returns sources.
+- **Codex**: also searches the live web. Its `exec` stream shows a `web_search`
+  item running, and it returns current facts with sources (verified by asking
+  for today's date, which it got right). This is Codex's own built-in search, on
+  by default - the bridge does not have to enable it.
+- **opencode**: has no general search tool in a bridge turn, only page fetch.
+  Asked to search, it says so rather than guessing.
+
+(How this was established: the bridge's chat timeline only shows MockFlow tools,
+so an agent's own web tool never appears there. Whether a CLI searched was read
+from its raw event stream - Claude's `WebSearch`, Codex's `web_search` item -
+not from the bridge's step rows.)
 
 Whichever you use, a component that needs real-world data still generates. When
 search is unavailable the assistant falls back to what it already knows and
 leaves unknown specifics as placeholders rather than inventing them.
+
+## Which model answered
+
+`mockflow-bridge status` and the editor show the model that generated the last
+turn, when the CLI reveals it:
+
+- **Claude Code**: named in its JSON stream, so it is always known and exact.
+- **opencode**: read from its `--print-logs` output (the `agent=mfbridge` line),
+  so it shows whatever model your opencode is configured to use.
+- **Codex**: not reported. Its `exec --json` stream carries no model field and
+  there is no log flag that prints one, so the bridge leaves it blank rather than
+  guess.
+
+The value updates after each turn and rides the `agent-info` frame and
+`chat-done`/`compgen-done`, so the editor can label a drawing with the model
+that made it.
 
 ## Things that are the same on all three
 

@@ -156,7 +156,10 @@ module.exports = {
 			}
 		};
 
-		const args = ['run', '--format', 'json', '--agent', 'mfbridge'];
+		// --print-logs puts opencode's own logs on stderr, the only place the model
+		// for this turn appears (the JSON stream carries tokens and cost but no
+		// model). parseStderr picks it out.
+		const args = ['run', '--format', 'json', '--print-logs', '--agent', 'mfbridge'];
 		if (turn.resume) args.push('-s', turn.resume);
 
 		// Prompt is the positional, and it MUST come before any `-f`: opencode's
@@ -199,6 +202,19 @@ module.exports = {
 		// not passed through: the server prefix is proof enough of whose tool it is.
 		return name.indexOf('mockflow_') === 0
 			&& String(allowedTools || '').indexOf('mcp__mockflow__*') !== -1;
+	},
+
+	/**
+	 * The model for this turn, read from a --print-logs stderr line. opencode logs
+	 * a `stream` line per agent; the one that matters is our own agent, tagged
+	 * `agent=mfbridge` - the other (`agent=title`, `small=true`) is the throwaway
+	 * title generator and names a different, smaller model. Returns { type:'model',
+	 * id } or null.
+	 */
+	parseStderr(line) {
+		if (line.indexOf('agent=mfbridge') === -1) return null;
+		const m = /modelID=(\S+)/.exec(line);
+		return m ? { type: 'model', id: m[1] } : null;
 	},
 
 	/**

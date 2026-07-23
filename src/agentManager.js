@@ -343,6 +343,33 @@ class AgentManager {
 		return names;
 	}
 
+	/**
+	 * Record the model that answered a turn and, once known, publish it so the
+	 * editor and `status` can show which model is generating. Different agents
+	 * surface it differently - Claude in its JSON stream, opencode in a
+	 * --print-logs stderr line, Codex not at all - so this is fed from both the
+	 * event loop and the stderr handler and just keeps the first value it gets.
+	 */
+	_noteModel(model, hub) {
+		if (!model || model === this.currentModel) return;
+		this.currentModel = model;
+		this.log('Turn model: ' + model);
+		if (hub && hub.agentInfo) {
+			hub.agentInfo.model = model;
+			if (hub.broadcast) hub.broadcast({ t: 'agent-info', agentInfo: hub.agentInfo });
+		}
+	}
+
+	/**
+	 * Feed one stderr line to the agent's optional stderr parser (opencode reports
+	 * its model there). Returns the model id if this line carried one.
+	 */
+	_modelFromStderr(line) {
+		if (!this.agent.parseStderr) return null;
+		const ev = this.agent.parseStderr(line);
+		return ev && ev.type === 'model' ? ev.id : null;
+	}
+
 	_allowedTools() {
 		var tools = ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'mcp__mockflow__*'];
 		if (process.env.MFBRIDGE_ALLOW_WRITE === '1') tools.push('Write', 'Edit', 'Bash');
@@ -492,6 +519,8 @@ class AgentManager {
 				var ev = events[e];
 				if (ev.type === 'session') {
 					if (!session.sessionId) session.sessionId = ev.id;
+				} else if (ev.type === 'model') {
+					self._noteModel(ev.id, hub);
 				} else if (ev.type === 'text') {
 					// Agents differ in what a text event carries: whole blocks (joined
 					// with a blank line) or incremental deltas (appended verbatim).
@@ -534,8 +563,18 @@ class AgentManager {
 		});
 
 		var stderrTail = '';
+		var stderrBuf = '';
 		proc.stderr.on('data', function(d) {
 			stderrTail = (stderrTail + d.toString()).slice(-2000);
+			// The model may ride a stderr log line (opencode). Scan complete lines.
+			stderrBuf += d.toString();
+			var nl;
+			while ((nl = stderrBuf.indexOf('\n')) >= 0) {
+				var sline = stderrBuf.slice(0, nl);
+				stderrBuf = stderrBuf.slice(nl + 1);
+				var m = self._modelFromStderr(sline);
+				if (m) self._noteModel(m, hub);
+			}
 		});
 
 		function finish(ok, error) {
@@ -553,7 +592,7 @@ class AgentManager {
 			if (!self.agent.capabilities.streamsPartialText && replyText) {
 				sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 			}
-			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error });
+			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error, model: self.currentModel || null });
 		}
 
 		proc.on('error', function(err) {
@@ -752,7 +791,9 @@ class AgentManager {
 			var events = self.agent.parseLine(line);
 			for (var e = 0; e < events.length; e++) {
 				var ev = events[e];
-				if (ev.type === 'tool-start') {
+				if (ev.type === 'model') {
+					self._noteModel(ev.id, hub);
+				} else if (ev.type === 'tool-start') {
 					toolCalled = true;
 					// Idempotent per tool id: an agent that announces a tool before it
 					// runs (and again when the call is complete) must not open two rows.
@@ -783,7 +824,18 @@ class AgentManager {
 		});
 
 		var stderrTail = '';
-		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
+		var stderrBuf = '';
+		proc.stderr.on('data', function(d) {
+			stderrTail = (stderrTail + d.toString()).slice(-2000);
+			stderrBuf += d.toString();
+			var nl;
+			while ((nl = stderrBuf.indexOf('\n')) >= 0) {
+				var sline = stderrBuf.slice(0, nl);
+				stderrBuf = stderrBuf.slice(nl + 1);
+				var mdl = self._modelFromStderr(sline);
+				if (mdl) self._noteModel(mdl, hub);
+			}
+		});
 
 		var finished = false;
 		function finish(ok, error, fallback) {

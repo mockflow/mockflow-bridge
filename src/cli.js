@@ -83,6 +83,7 @@ async function status() {
 	console.log('  ' + paint.dim('agent') + '   : '
 		+ (active ? active + (data.agentAvailable === false ? paint.yellow(' (not installed)') : '')
 			: paint.yellow('none installed'))
+		+ (data.model ? paint.dim(' · ' + data.model) : '')
 		+ paint.dim('  (change: mockflow-bridge agent <id>)'));
 	console.log('  ' + paint.dim('files') + '   : ' + (data.workspace
 		? ui.shortenPath(data.workspace)

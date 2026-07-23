@@ -143,6 +143,12 @@ module.exports = {
 
 		if (evt.session_id) out.push({ type: 'session', id: evt.session_id });
 
+		// The model that actually answered, so the editor can show it. The `system`
+		// init event and every `assistant` event carry it; the manager keeps the
+		// first it sees for the turn.
+		if (evt.model) out.push({ type: 'model', id: evt.model });
+		else if (evt.message && evt.message.model) out.push({ type: 'model', id: evt.message.model });
+
 		// Partial stream: content_block_start names the tool as soon as the model
 		// starts calling it. Without it the row only appears once the whole tool_use
 		// block is written, which for the HTML tools means a long silent gap.

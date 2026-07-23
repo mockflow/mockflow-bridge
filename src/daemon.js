@@ -70,6 +70,9 @@ async function start(opts) {
 		// Which agent is answering, so the editor can say so instead of assuming.
 		agentId: picked.agent ? picked.agent.id : null,
 		agentName: picked.agent ? picked.agent.label : null,
+		// The model that answered the last turn. Unknown until the first turn runs
+		// (and never known for an agent that does not report it, e.g. Codex).
+		model: null,
 		agents: picked.choices.map(function(c) { return { id: c.id, label: c.label }; }),
 		hasWorkspace: !!agents.hasWorkspace,
 		workspaceName: agents.hasWorkspace ? path.basename(agents.workspace) : null,
@@ -116,6 +119,7 @@ async function start(opts) {
 				agent: agents.agent ? agents.agent.id : null,
 				agentLabel: agents.agent ? agents.agent.label : null,
 				agentAvailable: agents.detect(),
+				model: agents.currentModel || null,
 				workspace: agents.hasWorkspace ? agents.workspace : null,
 				boards: hub.listBoards()
 			}));
