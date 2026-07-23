@@ -509,7 +509,7 @@ function helpBody() {
 	if (s.upd) { lines.push('   ' + C.cyan('v' + s.upd.latest + ' available') + C.dim(' (you\'re on v' + s.upd.current + ')')); lines.push('   ' + C.white('npm i -g @mockflow/mockflow-bridge')); }
 	else lines.push('   ' + C.green('up to date ✓'));
 	lines.push(''); lines.push(' ' + C.bold('Need a hand?'));
-	lines.push('   ' + C.cyan('docs.mockflow.com/bridge') + C.dim(' · ') + C.cyan('support@mockflow.com'));
+	lines.push('   ' + C.cyan('support.mockflow.com') + C.dim(' · ') + C.cyan('support@mockflow.com'));
 	return lines;
 }
 function detailBody() {
