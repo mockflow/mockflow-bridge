@@ -170,15 +170,30 @@ class BoardHub {
 
 			case 'register':
 				if (!tab.paired) return this._send(ws, { t: 'pair-required' });
+				// Plan flag from the editor's authenticated session (MF_UserSession).
+				// Basic (free) plan gates workspace file reading, concurrent boards and
+				// connected sources; anything else gets the full bridge.
+				tab.isBasic = !!msg.isBasic;
+				// Concurrent boards are a Pro feature: a basic user drives one live board
+				// at a time. A second, DIFFERENT board is refused (with an upgrade nudge)
+				// instead of registering; another tab of the same board re-registers freely.
+				if (tab.isBasic && this._otherBoardCount(ws, msg.projectid || null) > 0) {
+					this.log('Refused concurrent board for basic plan: "' + (msg.title || msg.projectid) + '"');
+					return this._send(ws, {
+						t: 'gate', feature: 'concurrent-boards',
+						message: 'Your plan connects one board to the local agent at a time. '
+							+ 'Close the other connected board, or upgrade to drive several boards at once.'
+					});
+				}
 				tab.registered = true;
 				tab.projectid = msg.projectid || null;
 				tab.title = msg.title || null;
 				tab.focused = !!msg.focused;
 				tab.visible = msg.visible !== false;
 				tab.url = msg.url || null;
-				this._send(ws, { t: 'registered', agentInfo: this.agentInfo || null });
+				this._send(ws, { t: 'registered', agentInfo: this._agentInfoFor(tab) });
 				this.log('Board connected: "' + (tab.title || tab.projectid) + '"'
-					+ (tab.focused ? ' (focused)' : ''));
+					+ (tab.focused ? ' (focused)' : '') + (tab.isBasic ? ' [basic plan]' : ''));
 				return;
 
 			case 'state':
@@ -256,6 +271,47 @@ class BoardHub {
 		this.tabs.forEach(function(tab, ws) {
 			if (tab.registered) self._send(ws, frame);
 		});
+	}
+
+	// ---- plan gating ---------------------------------------------------------
+
+	/**
+	 * How many DISTINCT other boards (by projectid) are already registered besides
+	 * this connection and the board it is registering. Holds a basic-plan user to
+	 * one live board: another tab of the SAME board (same projectid, a reload) does
+	 * not count, only a genuinely different board does.
+	 */
+	_otherBoardCount(selfWs, projectid) {
+		var seen = {};
+		this.tabs.forEach(function(t, ws) {
+			if (ws === selfWs || !t.registered) return;
+			var pid = t.projectid || t.id;
+			if (projectid && pid === projectid) return; // same board, another tab
+			seen[pid] = true;
+		});
+		return Object.keys(seen).length;
+	}
+
+	/**
+	 * The agentInfo reported to one tab. Workspace file reading is a Pro feature,
+	 * so a basic-plan tab is told files are off even when the bridge runs with
+	 * --workspace - keeping Mida from advertising a capability this plan will not
+	 * honor (agentManager runs the turn in the scratch dir either way).
+	 */
+	_agentInfoFor(tab) {
+		var info = this.agentInfo || null;
+		if (!info || !tab || !tab.isBasic) return info;
+		if (!info.hasWorkspace && !info.workspaceName) return info;
+		var clone = Object.assign({}, info);
+		clone.hasWorkspace = false;
+		clone.workspaceName = null;
+		return clone;
+	}
+
+	/** True when the board a tool call targets belongs to a basic (free) plan. */
+	isTargetBasic(projectid) {
+		try { return !!this._targetTab(projectid || null).tab.isBasic; }
+		catch (e) { return false; }
 	}
 
 	// ---- board targeting -----------------------------------------------------

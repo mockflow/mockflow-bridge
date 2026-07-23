@@ -206,6 +206,13 @@ class McpEndpoint {
 				case 'call_source_tool': {
 					const op = name === 'list_source_tools' ? 'list'
 						: (name === 'describe_source_tool' ? 'describe' : 'call');
+					// Connected sources are a Pro feature. Refuse the basic plan here so an
+					// external MCP agent (Cursor, Codex) gets a clear reason too - the editor
+					// gates its own source path as well (agentbridge handleSource).
+					if (this.hub.isTargetBasic(args.projectid || null)) {
+						return this._err('Connected sources (Notion, Jira, Slack, GitHub, ...) are a Pro feature. '
+							+ 'Ask the user to upgrade to connect and use their data sources from the local agent.');
+					}
 					if (op !== 'list' && !args.tool) {
 						return this._err('"tool" is required - use list_source_tools to see the available tool names.');
 					}

@@ -168,6 +168,13 @@ class AgentManager {
 	}
 
 	_resolveWorkspace(cliWorkspace) {
+		// The empty scratch dir a turn runs in when files are off: no --workspace was
+		// given, OR the connected user's plan does not include file reading (see
+		// _effectiveWorkspace). Always available so a basic-plan turn has somewhere to run.
+		var scratch = path.join(os.tmpdir(), 'mockflow-bridge-scratch');
+		try { fs.mkdirSync(scratch, { recursive: true }); } catch (e) {}
+		this.scratchDir = scratch;
+
 		var explicit = cliWorkspace || process.env.MFBRIDGE_WORKSPACE || null;
 		if (explicit) {
 			var w = path.resolve(explicit);
@@ -179,9 +186,23 @@ class AgentManager {
 		// MFBRIDGE_WORKSPACE) to let Mida read that one folder. Nothing is ever
 		// uploaded either way - only what the agent draws is sent to MockFlow.
 		this.hasWorkspace = false;
-		var scratch = path.join(os.tmpdir(), 'mockflow-bridge-scratch');
-		try { fs.mkdirSync(scratch, { recursive: true }); } catch (e) {}
 		return scratch;
+	}
+
+	/**
+	 * The folder a turn from this tab actually runs in. Workspace file reading is a
+	 * Pro feature: a basic-plan tab (tab.isBasic, set from the editor's register
+	 * frame) runs in the scratch dir even when the bridge was started with
+	 * --workspace, so a free user's local agent can read nothing. Everything else
+	 * about the turn is unchanged.
+	 */
+	_effectiveWorkspace(tab) {
+		return (tab && tab.isBasic) ? this.scratchDir : this.workspace;
+	}
+
+	/** Whether this tab's turns may read the workspace folder (false for basic plan). */
+	_workspaceEnabled(tab) {
+		return this.hasWorkspace && !(tab && tab.isBasic);
 	}
 
 	/**
@@ -419,10 +440,14 @@ class AgentManager {
 		const prevSelected = hub.selectedProjectId;
 		if (tab.projectid) hub.selectedProjectId = tab.projectid;
 
+		// The folder this turn runs in. A basic-plan tab gets the scratch dir even
+		// when --workspace is set (workspace file reading is a Pro feature).
+		const ws = this._effectiveWorkspace(tab);
+
 		// When no workspace is set the agent can read no files. If the user asks
 		// about their local files, answer helpfully instead of failing silently.
 		var systemPrompt = PERSONA + RESEARCH_GUIDANCE;
-		if (!this.hasWorkspace) {
+		if (!this._workspaceEnabled(tab)) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
 				+ 'them to restart the bridge with --workspace <path> to enable it, and reassure them their '
@@ -456,7 +481,7 @@ class AgentManager {
 		// conversation because the prompt is self-contained).
 		const canResume = this.agent.capabilities.resume === 'by-id';
 		const spec = this.agent.buildArgs({
-			cwd: this.workspace,
+			cwd: ws,
 			prompt: turnText,
 			systemPrompt: systemPrompt,
 			allowedTools: allowedTools,
@@ -473,13 +498,13 @@ class AgentManager {
 
 		this.log('Local agent turn for board "' + (tab.title || key) + '"'
 			+ (session.sessionId ? ' (resumed session)' : ' (new session)')
-			+ ', workspace: ' + this.workspace);
+			+ ', workspace: ' + ws + (tab && tab.isBasic ? ' (basic plan - files off)' : ''));
 
 		var proc;
 		try {
 			proc = this.agent.spawn(spec.args, {
 				env: Object.assign({}, process.env, spec.env || {}),
-				cwd: this.workspace
+				cwd: ws
 			});
 		} catch (err) {
 			session.busy = false;
@@ -753,8 +778,9 @@ class AgentManager {
 				+ ' Always finish by calling the render tool with complete data.';
 		}
 
+		const ws = this._effectiveWorkspace(tab);
 		const spec = this.agent.buildArgs({
-			cwd: this.workspace,
+			cwd: ws,
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
@@ -763,7 +789,7 @@ class AgentManager {
 		});
 
 		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
-			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + this.workspace);
+			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + ws);
 		// What the CLI was actually asked to do. Every "it behaved differently than
 		// when I ran it by hand" bug so far came down to a flag the turn did or did
 		// not carry, and there is no other way to see the spawned command line.
@@ -773,7 +799,7 @@ class AgentManager {
 		try {
 			proc = this.agent.spawn(spec.args, {
 				env: Object.assign({}, process.env, spec.env || {}),
-				cwd: this.workspace
+				cwd: ws
 			});
 		} catch (err) {
 			hub.clearCapture(tab.projectid);
@@ -940,8 +966,9 @@ class AgentManager {
 		// partialMessages: announces each render tool the moment the model starts
 		// writing it, so the step row appears immediately instead of after thousands
 		// of characters of HTML have streamed out (same reason the chat turn uses it).
+		const ws = this._effectiveWorkspace(tab);
 		const spec = this.agent.buildArgs({
-			cwd: this.workspace,
+			cwd: ws,
 			prompt: prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
@@ -956,7 +983,7 @@ class AgentManager {
 		try {
 			proc = this.agent.spawn(spec.args, {
 				env: Object.assign({}, process.env, spec.env || {}),
-				cwd: this.workspace
+				cwd: ws
 			});
 		} catch (err) {
 			this.log('[plan] generate launch failed: ' + err.message);
