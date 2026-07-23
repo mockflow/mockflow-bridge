@@ -54,7 +54,10 @@ const config = require('../config');
 const AGENTS = [
 	require('./claude'),
 	require('./codex'),
-	require('./opencode')
+	require('./opencode'),
+	// BridgeAI (our own OpenAI-compatible agent) is LAST and only "available" when
+	// a provider key is set, so it never disturbs the CLI agents' auto-select.
+	require('../bridgeai')
 ];
 
 function byId(id) {

@@ -41,6 +41,16 @@ if (isStart && cmd !== '--help' && cmd !== '-h' && cmd !== '--version' && cmd !=
 	});
 } else if (cmd === 'stdio') {
 	require('../src/stdioProxy').start();
+} else if (cmd === 'bridgeai-run') {
+	// Internal: one BridgeAI turn, spawned by the bridgeai adapter. Reads the turn
+	// from BRIDGEAI_TURN, emits the normalized JSONL event contract on stdout.
+	require('../src/bridgeai/run').main();
+} else if (cmd === 'bridgeai') {
+	// BridgeAI provider & model selection (mockflow-bridge bridgeai [provider|model] ...).
+	require('../src/bridgeai/cli').run(rest).catch(function(err) {
+		console.error(err && err.message);
+		process.exit(1);
+	});
 } else if (cmd === 'status') {
 	require('../src/cli').status();
 } else if (cmd === 'agent' || cmd === 'agents') {

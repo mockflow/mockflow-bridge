@@ -37,6 +37,11 @@ function help() {
 	line('mockflow-bridge agent pick', 'choose from a list in the terminal');
 	line('mockflow-bridge agent clear', 'forget the saved choice (ask again next start)');
 	console.log('');
+	console.log(paint.bold('BridgeAI commands:') + paint.dim('  (the built-in OpenAI-compatible agent)'));
+	line('mockflow-bridge bridgeai', 'show configured providers, active provider + model');
+	line('mockflow-bridge bridgeai provider [id]', 'pick / set the provider (OpenRouter, Azure, Bedrock)');
+	line('mockflow-bridge bridgeai model [id]', 'pick / set the model for the active provider');
+	console.log('');
 	console.log(paint.bold('Reset commands:'));
 	line('mockflow-bridge reset', 'forget agent choice, attachments, catalog cache, debug dumps');
 	line('mockflow-bridge reset --all', 'the above plus MCP token and paired boards');

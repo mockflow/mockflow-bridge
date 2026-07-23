@@ -74,6 +74,10 @@ module.exports = {
 	// Last-known latest version on npm, written by a background check (updateCheck.js)
 	// so the "you are behind" notice is instant and offline-safe on the next start.
 	UPDATE_CACHE_FILE: path.join(HOME_DIR, 'bridge-update-check.json'),
+	// BridgeAI selection: the active OpenAI-compatible provider, and the chosen
+	// model PER provider ({ <providerId>: <modelId> } — ids are not portable).
+	BRIDGEAI_PROVIDER_FILE: path.join(HOME_DIR, 'bridge-provider'),
+	BRIDGEAI_MODEL_FILE: path.join(HOME_DIR, 'bridge-model.json'),
 
 	// The catalog endpoint (Engine + Catalog split): tool definitions, prompts,
 	// schemas and mapping rules are fetched from MockFlow at startup so new AI
