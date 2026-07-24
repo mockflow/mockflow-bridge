@@ -211,18 +211,38 @@ function yankFeed() {
 	}).join('\n');
 	copyToClipboard(text, activity.length);
 }
-/** Copy to the system clipboard via OSC 52 - no native clipboard dep, works over SSH.
- *  Confirmation shows briefly in the ACTIVITY header, NOT as a feed line (which would
- *  land in the very text being copied). */
+/** Copy to the system clipboard. Two paths, both fired: (1) a native clipboard
+ *  command (pbcopy / xclip / wl-copy / clip) so a LOCAL terminal that ignores
+ *  OSC 52 — e.g. macOS Terminal.app, or iTerm2/tmux without it enabled — still
+ *  gets the text; (2) OSC 52, which forwards to the user's LOCAL clipboard when
+ *  they're SSH'd in (where the native command would target the remote box).
+ *  Whichever matches the user's paste target wins. Confirmation shows briefly in
+ *  the ACTIVITY header, NOT as a feed line (which would land in the copied text). */
 function copyToClipboard(text, n) {
 	if (!text) return;
-	try {
-		var b64 = Buffer.from(String(text), 'utf8').toString('base64');
-		scr('\x1b]52;c;' + b64 + '\x07');
-		flashCopied('✓ copied ' + n + ' line' + (n === 1 ? '' : 's'));
-	} catch (e) {
-		flashCopied('copy failed');
-	}
+	var str = String(text);
+	// OSC 52 fallback (covers SSH / remote sessions).
+	try { scr('\x1b]52;c;' + Buffer.from(str, 'utf8').toString('base64') + '\x07'); } catch (e) {}
+	// Native local clipboard — the reliable path for a terminal on this machine.
+	nativeCopy(str);
+	flashCopied('✓ copied ' + n + ' line' + (n === 1 ? '' : 's'));
+}
+/** Pipe text to the platform clipboard command, if one exists. Failures (no tool,
+ *  no display over SSH) are swallowed — OSC 52 above is the fallback. */
+function nativeCopy(str) {
+	var cmds = process.platform === 'darwin' ? [['pbcopy', []]]
+		: process.platform === 'win32' ? [['clip', []]]
+		: [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['--clipboard', '--input']]];
+	var cp = require('child_process');
+	(function tryNext(i) {
+		if (i >= cmds.length) return;
+		try {
+			var p = cp.spawn(cmds[i][0], cmds[i][1], { stdio: ['pipe', 'ignore', 'ignore'] });
+			p.on('error', function () { tryNext(i + 1); });   // command missing — try the next
+			p.stdin.on('error', function () {});
+			p.stdin.end(str);
+		} catch (e) { tryNext(i + 1); }
+	})(0);
 }
 function flashCopied(msg) {
 	copiedMsg = msg;
