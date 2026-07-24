@@ -72,7 +72,11 @@ module.exports = {
 		restrictTools: 'per-run',   // an allowlist can be passed per turn
 		resume: 'by-id',            // sessions resume by an id we captured
 		systemPrompt: 'flag',       // per-turn instructions ride a flag
-		extraDirs: true             // extra readable directories per turn
+		extraDirs: true,            // extra readable directories per turn
+		// -p reads the prompt from argv, but piped stdin is available to the turn as
+		// context. On Windows that lets a large/multi-line prompt bypass the cmd.exe
+		// command line (8191-char limit + newline breakage) - see agentManager._deliverPrompt.
+		acceptsStdinPrompt: true
 	},
 
 	detect() {

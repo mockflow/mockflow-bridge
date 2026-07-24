@@ -262,6 +262,47 @@ class AgentManager {
 		return head;
 	}
 
+	/**
+	 * Decide how a turn's prompt reaches the agent, returning { prompt, stdin }.
+	 *
+	 * spawnPortable wraps every Windows spawn in `cmd.exe /d /s /c "<line>"`, which caps the
+	 * command line at ~8191 chars and treats the prompt's newlines as command terminators. A
+	 * large or multi-line prompt (a multi-board plan, pasted meeting notes) is truncated there -
+	 * and because `-p <prompt>` comes before `--mcp-config` in the argv, the dropped tail is
+	 * exactly the flags that give the agent its board tools, so it launches tool-less and
+	 * silently draws nothing. When the agent can read stdin, hand it the prompt that way and
+	 * leave `-p` a short directive, so nothing large rides the command line.
+	 *
+	 * macOS/Linux spawn the CLI directly (ARG_MAX is hundreds of KB), so the prompt stays inline
+	 * and unchanged. Set MFBRIDGE_FORCE_STDIN_PROMPT=1 to exercise the stdin path off Windows.
+	 */
+	_deliverPrompt(rawPrompt) {
+		const text = String(rawPrompt == null ? '' : rawPrompt);
+		const force = process.env.MFBRIDGE_FORCE_STDIN_PROMPT === '1';
+		const risky = process.platform === 'win32' || force;
+		if (!risky || !this.agent.acceptsStdinPrompt) return { prompt: text, stdin: null };
+		// Short single-line prompts (the everyday chat turn) fit comfortably; leave them inline.
+		if (!force && text.length < 6000 && text.indexOf('\n') === -1) return { prompt: text, stdin: null };
+		return {
+			prompt: 'Carry out the task described on standard input exactly. If it lists items to create or '
+				+ 'render, produce every one of them, in order, using the mockflow tools, and do not ask for confirmation.',
+			stdin: text
+		};
+	}
+
+	/** spawn(), writing the prompt to stdin first when _deliverPrompt routed it there. */
+	_spawnWithPrompt(spec, delivery, opts) {
+		const spawnOpts = Object.assign({}, opts);
+		const viaStdin = delivery && delivery.stdin != null;
+		if (viaStdin) spawnOpts.stdio = ['pipe', 'pipe', 'pipe'];
+		const proc = this.agent.spawn(spec.args, spawnOpts);
+		if (viaStdin && proc.stdin) {
+			try { proc.stdin.write(delivery.stdin); proc.stdin.end(); }
+			catch (e) { this.log('Could not write prompt to agent stdin: ' + (e && e.message)); }
+		}
+		return proc;
+	}
+
 	/** Drop a board session's attachments (tab disconnected, or bridge exiting). */
 	clearAttachments(key) {
 		const dir = this.attachDirs.get(key);
@@ -480,9 +521,10 @@ class AgentManager {
 		// one that cannot simply starts fresh (its own turns still carry the
 		// conversation because the prompt is self-contained).
 		const canResume = this.agent.capabilities.resume === 'by-id';
+		const delivery = this._deliverPrompt(turnText);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
-			prompt: turnText,
+			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowedTools,
 			mockflowTools: this._mockflowToolNames(),
@@ -502,7 +544,7 @@ class AgentManager {
 
 		var proc;
 		try {
-			proc = this.agent.spawn(spec.args, {
+			proc = this._spawnWithPrompt(spec, delivery, {
 				env: Object.assign({}, process.env, spec.env || {}),
 				cwd: ws
 			});
@@ -786,9 +828,10 @@ class AgentManager {
 		}
 
 		const ws = this._effectiveWorkspace(tab);
+		const delivery = this._deliverPrompt(prompt);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
-			prompt: prompt,
+			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
 			mockflowTools: this._mockflowToolNames(),
@@ -804,7 +847,7 @@ class AgentManager {
 
 		var proc;
 		try {
-			proc = this.agent.spawn(spec.args, {
+			proc = this._spawnWithPrompt(spec, delivery, {
 				env: Object.assign({}, process.env, spec.env || {}),
 				cwd: ws
 			});
@@ -974,9 +1017,10 @@ class AgentManager {
 		// writing it, so the step row appears immediately instead of after thousands
 		// of characters of HTML have streamed out (same reason the chat turn uses it).
 		const ws = this._effectiveWorkspace(tab);
+		const delivery = this._deliverPrompt(prompt);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
-			prompt: prompt,
+			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
 			mockflowTools: this._mockflowToolNames(),
@@ -984,11 +1028,12 @@ class AgentManager {
 		});
 
 		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
-			+ items.map(function(it) { return it.tool; }).join(', ') + ']');
+			+ items.map(function(it) { return it.tool; }).join(', ') + ']'
+			+ (delivery.stdin != null ? ' (prompt via stdin)' : ''));
 
 		var proc;
 		try {
-			proc = this.agent.spawn(spec.args, {
+			proc = this._spawnWithPrompt(spec, delivery, {
 				env: Object.assign({}, process.env, spec.env || {}),
 				cwd: ws
 			});
@@ -1084,9 +1129,21 @@ class AgentManager {
 		};
 		proc.on('error', function(err) { done('failed to run', false, 'Local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
-			if (code === 0) done('finished', true, null);
-			else done('exited ' + code, false, 'The local agent stopped before finishing the board'
-				+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
+			if (code === 0 && stepCounter === 0) {
+				// Exited cleanly but rendered nothing: the agent ran without ever calling a
+				// board tool. On Windows this is the tell-tale of a plan prompt that overflowed
+				// the cmd.exe command line and dropped --mcp-config. Report it instead of the
+				// phantom success the exit code alone would imply.
+				done('finished without drawing anything', false,
+					'The agent finished but none of the ' + items.length + ' planned components were drawn. '
+					+ 'If this is Windows with a large board plan, the plan may have exceeded the command-line '
+					+ 'limit - try fewer or smaller items, or update the bridge.');
+			} else if (code === 0) {
+				done('finished', true, null);
+			} else {
+				done('exited ' + code, false, 'The local agent stopped before finishing the board'
+					+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
+			}
 		});
 	}
 
