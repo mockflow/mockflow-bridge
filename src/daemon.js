@@ -274,12 +274,15 @@ async function start(opts) {
 	const useDashboard = !!(process.stdout.isTTY && process.stderr.isTTY)
 		&& !process.env.MFBRIDGE_NO_UI && !(opts && opts.noUi);
 	if (useDashboard) {
-		updateCheck.refresh();
-		require('./dashboard').start({
+		const dashboard = require('./dashboard');
+		dashboard.start({
 			hub: hub, agents: agents, registry: agentRegistry, config: config,
 			endpoint: endpoint, mcpToken: mcpToken, healthProblems: healthProblems,
 			onQuit: shutdown
 		});
+		// After start(), so a verdict from a still-fresh cache lands on a live screen.
+		// Re-checked while we run too - this process outlives an npm publish.
+		startUpdateWatch(updateCheck, function (info) { dashboard.notifyUpdate(info); });
 		return { server: server, hub: hub, mcp: mcp };
 	}
 
@@ -334,14 +337,26 @@ async function start(opts) {
 	}
 
 	// "You are behind the published version" - read from a cache a previous run left.
+	let shownUpdate = null;
+	const printUpdate = function () {
+		const lines = updateCheck.notice(paint);
+		if (!lines) return;
+		console.error(ui.noticeBox('⬆ mockflow-bridge update', lines, paint.teal, paint));
+		console.error('');
+	};
 	const updateLines = updateCheck.notice(paint);
 	if (updateLines) {
-		console.error(ui.noticeBox('⬆ mockflow-bridge update', updateLines, paint.teal, paint));
-		console.error('');
+		shownUpdate = (updateCheck.available() || {}).latest;
+		printUpdate();
 	}
 	// Fire-and-forget: schedules one HTTPS GET on the event loop (after this
-	// synchronous startup finishes) to refresh the cache for the next start.
-	updateCheck.refresh();
+	// synchronous startup finishes). When it comes back behind, say so now rather
+	// than leaving it for the next start - but never twice for the same version.
+	startUpdateWatch(updateCheck, function (info) {
+		if (shownUpdate === info.latest) return;
+		shownUpdate = info.latest;
+		printUpdate();
+	});
 
 	console.error(ui.pairingLine(hub.pairingCode,
 		'enter this in the MockFlow editor when it asks', paint));
@@ -427,6 +442,19 @@ function killByPort(port) {
 			child.on('error', function() { resolve(); });
 		} catch (e) { resolve(); }
 	});
+}
+
+/**
+ * Check npm for a newer bridge now, then every few hours for as long as we run.
+ * `onUpdate({current, latest})` only fires when we are actually behind. The timer
+ * is unref'd, so it never keeps the process alive by itself.
+ */
+const UPDATE_WATCH_MS = 3 * 60 * 60 * 1000;
+function startUpdateWatch(updateCheck, onUpdate) {
+	updateCheck.refresh(onUpdate);
+	const timer = setInterval(function () { updateCheck.refresh(onUpdate); }, UPDATE_WATCH_MS);
+	if (timer.unref) timer.unref();
+	return timer;
 }
 
 function cors(res) {

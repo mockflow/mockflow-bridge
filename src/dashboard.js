@@ -371,7 +371,7 @@ function dash(W, H) {
 	var s = snapshot(), out = [];
 	// header (with top padding)
 	var live = !s.paired ? C.cyan('● waiting for a board') : C.green('● connected · ' + s.boards.length + ' board' + (s.boards.length > 1 ? 's' : ''));
-	var brand = C.cyan(BICON) + '  ' + C.white(C.bold('MockFlow Bridge'));
+	var brand = C.cyan(BICON) + '  ' + C.white(C.bold('MockFlow Bridge')) + '  ' + C.dim('v' + ctx.config.ENGINE_VERSION);
 	out.push('');
 	out.push(' ' + padEnd(brand, W - vlen(live) - 3) + live + ' ');
 	out.push(rule(W));
@@ -634,4 +634,17 @@ function quit() {
 	if (typeof ctx.onQuit === 'function') ctx.onQuit();
 }
 
-module.exports = { start: start };
+/**
+ * An update check landed while the dashboard is up. The header strip reads
+ * updateCheck.available() on every paint, so this only has to note it in the feed
+ * and repaint (pushAct renders for us).
+ */
+let announcedUpdate = '';
+function notifyUpdate(info) {
+	if (!active || announcedUpdate === info.latest) return;   // the watch re-checks; announce once
+	announcedUpdate = info.latest;
+	pushAct('⬆', 'ok', 'Update available — v' + info.current + ' → v' + info.latest
+		+ '.  npm i -g ' + ctx.config.PKG_NAME);
+}
+
+module.exports = { start: start, notifyUpdate: notifyUpdate };
