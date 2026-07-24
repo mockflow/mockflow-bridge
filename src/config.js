@@ -37,7 +37,13 @@ var allowedOrigins = [
 	// Developer test mode: a locally served editor build on port 8080. Harmless
 	// in production - a remote website can never present a localhost Origin.
 	'http://localhost:8080',
-	'http://127.0.0.1:8080'
+	'http://127.0.0.1:8080',
+	// The MockFlow desktop app. Its editor is loaded from file://, which browsers
+	// present as Origin "file://" (or "null") - allow-listing that would let any
+	// local .html the user happens to open reach the bridge. Instead the desktop
+	// app rewrites the Origin of its own bridge handshake to this synthetic value
+	// (webRequest.onBeforeSendHeaders in main.js), which no web page can forge.
+	'mockflow-desktop://app'
 ];
 if (process.env.MFBRIDGE_ALLOWED_ORIGINS) {
 	process.env.MFBRIDGE_ALLOWED_ORIGINS.split(',').forEach(function(o) {
