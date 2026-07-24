@@ -2,6 +2,17 @@
 
 **Use your own AI to draw on your MockFlow board.**
 
+```bash
+npm i -g @mockflow/mockflow-bridge   # install once
+mockflow-bridge                      # start it, every time you want to use it
+```
+
+Leave that window open, then enter the pairing code it shows in your MockFlow
+board. Node.js 18+ and an AI assistant are needed first &mdash; see
+[Getting started](#getting-started).
+
+---
+
 MockFlow Bridge is a small program you run on your own computer. It connects your
 own AI to MockFlow IdeaBoard opened in your browser, so the AI can create diagrams,
 wireframes, mindmaps, plans and charts directly on your board while you watch.
@@ -64,8 +75,8 @@ the reliable way, especially on macOS: it launches your AI the same way you set
 it up, so its sign-in is found.
 
 ```bash
-npm i -g @mockflow/mockflow-bridge     # once
-mockflow-bridge              # every time you want to start it
+npm i -g @mockflow/mockflow-bridge   # once
+mockflow-bridge                      # every time you want to start it
 ```
 
 To update your copy later, run `npm i -g @mockflow/mockflow-bridge` again.
