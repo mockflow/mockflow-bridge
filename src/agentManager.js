@@ -487,8 +487,12 @@ class AgentManager {
 
 		// When no workspace is set the agent can read no files. If the user asks
 		// about their local files, answer helpfully instead of failing silently.
+		// BUT a file attached in Mida this turn IS given to the agent (saved locally,
+		// path in the prompt) - so skip this "no file access" line when there is an
+		// attachment, or the agent (notably Codex, which does not take extraDirs)
+		// parrots "restart with --workspace" and refuses to read the file it was handed.
 		var systemPrompt = PERSONA + RESEARCH_GUIDANCE;
-		if (!this._workspaceEnabled(tab)) {
+		if (!this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
 				+ 'them to restart the bridge with --workspace <path> to enable it, and reassure them their '
@@ -524,6 +528,7 @@ class AgentManager {
 		const delivery = this._deliverPrompt(turnText);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
+			projectid: tab.projectid,
 			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowedTools,
@@ -831,6 +836,7 @@ class AgentManager {
 		const delivery = this._deliverPrompt(prompt);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
+			projectid: tab.projectid,
 			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
@@ -1020,6 +1026,7 @@ class AgentManager {
 		const delivery = this._deliverPrompt(prompt);
 		const spec = this.agent.buildArgs({
 			cwd: ws,
+			projectid: tab.projectid,
 			prompt: delivery.prompt,
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,

@@ -33,14 +33,18 @@ const { spawnCli, spawnCliSync } = require('./spawnPortable');
 const BIN = 'opencode';
 
 /** The bridge's own CLI, as an MCP server opencode can launch over stdio. */
-function stdioServer() {
+function stdioServer(projectid) {
 	const bin = path.join(__dirname, '..', '..', 'bin', 'mockflow-bridge.js');
+	// The shim finds the daemon through the port file, but an explicit port keeps a
+	// non-default MFBRIDGE_PORT working too. MFBRIDGE_BOARD board-scopes the shim's
+	// endpoint (/mcp/<token>/<projectid>) so this turn's draws target its own board
+	// and a concurrent turn on another tab cannot redirect them.
+	const environment = { MFBRIDGE_PORT: String(config.PORT) };
+	if (projectid) environment.MFBRIDGE_BOARD = String(projectid);
 	return {
 		type: 'local',
 		command: [process.execPath, bin, 'stdio'],
-		// The shim finds the daemon through the port file, but an explicit port
-		// keeps a non-default MFBRIDGE_PORT working too.
-		environment: { MFBRIDGE_PORT: String(config.PORT) },
+		environment: environment,
 		enabled: true
 	};
 }
@@ -167,7 +171,7 @@ module.exports = {
 		// One inline config per turn: MCP server, persona, tool allowlist. Nothing
 		// is written to the user's own config file.
 		const cfg = {
-			mcp: { mockflow: stdioServer() },
+			mcp: { mockflow: stdioServer(turn.projectid) },
 			agent: {
 				mfbridge: {
 					description: 'MockFlow Bridge turn',

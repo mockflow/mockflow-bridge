@@ -36,7 +36,11 @@ function discoverToken() {
 function start() {
 	const port = discoverPort();
 	const token = discoverToken();
-	const endpoint = 'http://127.0.0.1:' + port + '/mcp/' + token;
+	// Board-scope the endpoint when the adapter set MFBRIDGE_BOARD, so this turn's
+	// draws route to its own board (parity with the claude/codex HTTP URLs).
+	const board = (process.env.MFBRIDGE_BOARD || '').trim();
+	const endpoint = 'http://127.0.0.1:' + port + '/mcp/' + token
+		+ (board ? '/' + encodeURIComponent(board) : '');
 
 	const rl = readline.createInterface({ input: process.stdin, terminal: false });
 

@@ -17,16 +17,26 @@ const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
 const BIN = 'claude';
 
-/** The bridge's MCP endpoint, as a config file this CLI can be pointed at. */
-function mcpConfigPath() {
+/**
+ * The bridge's MCP endpoint, as a config file this CLI can be pointed at.
+ *
+ * When a projectid is given the URL is board-scoped (/mcp/<token>/<projectid>), so
+ * the daemon routes this turn's draws to THAT board and a concurrent turn on another
+ * tab cannot redirect them. The config is written to a per-board filename so two
+ * concurrent turns never clobber each other's file. Without a projectid it is the
+ * plain /mcp/<token> endpoint (external agents, the CLI-wiring hint).
+ */
+function mcpConfigPath(projectid) {
 	let token = '';
 	try { token = fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim(); } catch (e) {}
+	const suffix = projectid ? '/' + encodeURIComponent(String(projectid)) : '';
 	const cfg = {
 		mcpServers: {
-			mockflow: { type: 'http', url: 'http://127.0.0.1:' + config.PORT + '/mcp/' + token }
+			mockflow: { type: 'http', url: 'http://127.0.0.1:' + config.PORT + '/mcp/' + token + suffix }
 		}
 	};
-	const p = path.join(config.HOME_DIR, 'bridge-agent-mcp.json');
+	const fileSuffix = projectid ? '-' + String(projectid).replace(/[^\w.-]/g, '_') : '';
+	const p = path.join(config.HOME_DIR, 'bridge-agent-mcp' + fileSuffix + '.json');
 	fs.mkdirSync(config.HOME_DIR, { recursive: true });
 	fs.writeFileSync(p, JSON.stringify(cfg, null, '\t'));
 	return p;
@@ -143,7 +153,7 @@ module.exports = {
 		// Announces each tool as it starts, so the board shows "Drawing ..." while the
 		// agent is still writing the call instead of after it.
 		if (turn.partialMessages) args.push('--include-partial-messages');
-		args.push('--mcp-config', mcpConfigPath());
+		args.push('--mcp-config', mcpConfigPath(turn.projectid));
 		if (turn.allowedTools) args.push('--allowedTools', turn.allowedTools);
 		if (turn.systemPrompt) args.push('--append-system-prompt', turn.systemPrompt);
 		// Attachments live outside the workspace (and there may be no workspace at

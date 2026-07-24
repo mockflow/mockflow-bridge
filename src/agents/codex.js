@@ -19,10 +19,14 @@ const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
 const BIN = 'codex';
 
-function mcpUrl() {
+// Board-scoped when a projectid is given (/mcp/<token>/<projectid>): the daemon
+// routes this turn's draws to that board, so a concurrent turn on another tab
+// cannot hijack them. Unscoped otherwise (external/manual codex connections).
+function mcpUrl(projectid) {
 	let token = '';
 	try { token = fs.readFileSync(config.MCP_TOKEN_FILE, 'utf8').trim(); } catch (e) {}
-	return 'http://127.0.0.1:' + config.PORT + '/mcp/' + token;
+	return 'http://127.0.0.1:' + config.PORT + '/mcp/' + token
+		+ (projectid ? '/' + encodeURIComponent(String(projectid)) : '');
 }
 
 /**
@@ -180,7 +184,7 @@ module.exports = {
 		args.push('-c', 'approval_policy="never"');
 		// Read-only: a turn should draw on the board, not edit the user's machine.
 		args.push('-c', 'sandbox_mode="read-only"');
-		args.push('-c', 'mcp_servers.mockflow.url="' + mcpUrl() + '"');
+		args.push('-c', 'mcp_servers.mockflow.url="' + mcpUrl(turn.projectid) + '"');
 		// Codex asks the user before running an MCP tool, and in `exec` there is
 		// nobody to ask: the call comes back "user cancelled MCP tool call" and the
 		// turn ends having drawn nothing. Pre-approve this one server - it is the

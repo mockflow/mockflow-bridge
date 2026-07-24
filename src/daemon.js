@@ -168,7 +168,15 @@ async function start(opts) {
 		// MCP clients are local processes, so this route deliberately sends NO CORS
 		// headers: a browser must not be able to read its responses even if it
 		// somehow learns the token.
-		if (req.method === 'POST' && url === '/mcp/' + mcpToken) {
+		// A turn is spawned pointed at /mcp/<token>/<projectid> so its tool calls
+		// carry the board they belong to; an unscoped /mcp/<token> (external agents,
+		// the CLI-wiring hint) still works and falls back to the selected board.
+		const mcpBase = '/mcp/' + mcpToken;
+		if (req.method === 'POST' && (url === mcpBase || url.indexOf(mcpBase + '/') === 0)) {
+			var boardId = null;
+			if (url.length > mcpBase.length) {
+				try { boardId = decodeURIComponent(url.slice(mcpBase.length + 1)) || null; } catch (e) { boardId = null; }
+			}
 			var body = '';
 			req.on('data', function(c) {
 				body += c;
@@ -188,7 +196,7 @@ async function start(opts) {
 				// leaves the agent with no MockFlow tools at all.
 				const isNotification = !rpc || rpc.id === undefined || rpc.id === null;
 				try {
-					const result = await mcp.handle(rpc && rpc.method, (rpc && rpc.params) || {});
+					const result = await mcp.handle(rpc && rpc.method, (rpc && rpc.params) || {}, { boardId: boardId });
 					if (isNotification) {
 						res.writeHead(202);
 						return res.end();

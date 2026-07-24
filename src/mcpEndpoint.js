@@ -149,7 +149,14 @@ class McpEndpoint {
 		this.hub.notifyGenUsage(projectid || null);
 	}
 
-	async handle(method, params) {
+	// ctx.boardId (when present) is the board this connection is bound to - the
+	// projectid the daemon parsed from the /mcp/<token>/<projectid> URL that this
+	// turn was spawned with. It makes every draw target THIS turn's board instead
+	// of the shared hub.selectedProjectId, so two tabs generating at once no longer
+	// race that global (both landing on whichever was selected last). A null boardId
+	// (an unscoped /mcp/<token> connection, e.g. an external agent) keeps the old
+	// selectedProjectId fallback.
+	async handle(method, params, ctx) {
 		if (!method) return {};
 		if (method.indexOf('notifications/') === 0 || method === 'initialized') return {};
 
@@ -166,7 +173,7 @@ class McpEndpoint {
 			case 'tools/list':
 				return { tools: this.registry.getToolDefinitions().concat(BRIDGE_TOOLS) };
 			case 'tools/call':
-				return this._toolsCall(params || {});
+				return this._toolsCall(params || {}, ctx);
 			case 'resources/list':
 				return { resources: [] };
 			case 'prompts/list':
@@ -176,10 +183,17 @@ class McpEndpoint {
 		}
 	}
 
-	async _toolsCall(params) {
+	async _toolsCall(params, ctx) {
 		const name = params.name;
 		const args = params.arguments || {};
 		if (!name) throw new Error('Tool name is required');
+
+		// The board this connection is bound to (see handle()). Used as the target
+		// for every draw/read/relay below, so a concurrent turn on another tab can
+		// never redirect this one. Falls back to null (-> hub.selectedProjectId) for
+		// an unscoped connection, and an explicit args.projectid still wins where a
+		// tool documents one.
+		const board = (ctx && ctx.boardId) || null;
 
 		try {
 			switch (name) {
@@ -198,7 +212,7 @@ class McpEndpoint {
 				}
 
 				case 'read_board': {
-					const data = await this.hub.runOnBoard(args.projectid || null,
+					const data = await this.hub.runOnBoard(args.projectid || board || null,
 						{ t: 'read', what: 'board' }, config.READ_TIMEOUT_MS);
 					return this._ok(JSON.stringify(data));
 				}
@@ -209,7 +223,7 @@ class McpEndpoint {
 					}
 					// The tab owns the component's current data, so it builds the modify
 					// prompt and runs the edit; this only carries the request.
-					const res = await this.hub.runOnBoard(args.projectid || null,
+					const res = await this.hub.runOnBoard(args.projectid || board || null,
 						{ t: 'modify', cid: String(args.componentId), instruction: String(args.instruction) },
 						config.HTML_TOOL_TIMEOUT_MS);
 					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
@@ -226,14 +240,14 @@ class McpEndpoint {
 					// Connected sources are a Pro feature. Refuse the basic plan here so an
 					// external MCP agent (Cursor, Codex) gets a clear reason too - the editor
 					// gates its own source path as well (agentbridge handleSource).
-					if (this.hub.isTargetBasic(args.projectid || null)) {
+					if (this.hub.isTargetBasic(args.projectid || board || null)) {
 						return this._err('Connected sources (Notion, Jira, Slack, GitHub, ...) are a Pro feature. '
 							+ 'Ask the user to upgrade to connect and use their data sources from the local agent.');
 					}
 					if (op !== 'list' && !args.tool) {
 						return this._err('"tool" is required - use list_source_tools to see the available tool names.');
 					}
-					const data = await this.hub.runOnBoard(args.projectid || null,
+					const data = await this.hub.runOnBoard(args.projectid || board || null,
 						{ t: 'source', op: op, tool: args.tool || '', args: args.args || {} },
 						config.SOURCE_TIMEOUT_MS || config.TOOL_TIMEOUT_MS);
 					return this._ok(typeof data === 'string' ? data : JSON.stringify(data));
@@ -241,8 +255,8 @@ class McpEndpoint {
 
 				case 'layout_board': {
 					// An explicit layout consumes any armed plan - never arrange the same batch twice.
-					this.hub.clearPlan(null);
-					const count = await this.hub.runOnBoard(null,
+					this.hub.clearPlan(board);
+					const count = await this.hub.runOnBoard(board,
 						{ t: 'layout', boardTitle: args.boardTitle || 'Board' });
 					return this._ok('Arranged ' + count + ' visualizations in a bento layout under the section "'
 						+ (args.boardTitle || 'Board') + '". The board is already updated in front of the user.');
@@ -279,7 +293,7 @@ class McpEndpoint {
 					// user's Generate Board click later arms the auto-arrange plan and
 					// starts the generation turn (hub.onPlanGenerate -> agent manager);
 					// until they decide, the hub refuses draws on the board.
-					this.hub.startPlanPick(args._projectid || null, title, items);
+					this.hub.startPlanPick(board, title, items);
 					return this._ok('The plan (' + items.length + ' components under "' + title + '") is now on '
 						+ 'the user\'s screen for review. YOUR TURN IS COMPLETE: do not render anything and do '
 						+ 'not call any more tools - when the user clicks Generate Board, the chosen items are '
@@ -297,7 +311,7 @@ class McpEndpoint {
 			// Create/Modify AI, which fills in place (a capture) but is still a
 			// generation - and reports the running usage to the editor, which does the
 			// prevention itself (like AI credits). Pro/trial boards are not metered.
-			const meter = this.hub.isTargetBasic(args._projectid || null);
+			const meter = this.hub.isTargetBasic(board);
 
 			// Debug tracing: print/dump what the agent generated for this render (see debug.js).
 			debug.toolCall(name, args);
@@ -308,9 +322,9 @@ class McpEndpoint {
 				// through the MockFlow endpoints with the user's own session, then draws the
 				// result - the bridge only relays the args (see boardHub.drawHtml).
 				const mcpType = name.replace('render_', '');
-				const hres = await this.hub.drawHtml(args._projectid || null, name, mcpType, args);
+				const hres = await this.hub.drawHtml(board, name, mcpType, args);
 				// A wireframelite/prototypelite render always draws - count it for basic plans.
-				if (meter) this._recordGen(args._projectid || null);
+				if (meter) this._recordGen(board);
 				// Conversion report from the tab (component/chart/icon counts + warnings). It
 				// goes back to the AGENT too: a sparse or icon-less render is something the
 				// agent can fix by regenerating the HTML, but only if it is told.
@@ -347,11 +361,11 @@ class McpEndpoint {
 			// If a component Generate/Modify turn armed a capture for this board,
 			// the gdata fills the component the user is editing instead of drawing
 			// a new one (fill-in-place). Otherwise it draws normally.
-			const res = await this.hub.captureOrDraw(args._projectid || null, name, gdata);
+			const res = await this.hub.captureOrDraw(board, name, gdata);
 
 			// Count the draw against the basic-plan cap - whether it drew a new
 			// component or filled one in place (capture). Both are a generation.
-			if (meter) this._recordGen(args._projectid || null);
+			if (meter) this._recordGen(board);
 
 			const type = name.replace('render_', '');
 			if (res && res.captured) {
