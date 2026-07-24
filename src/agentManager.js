@@ -263,35 +263,94 @@ class AgentManager {
 	}
 
 	/**
-	 * Decide how a turn's prompt reaches the agent, returning { prompt, stdin }.
+	 * Decide how a turn's prompt reaches the agent, returning { prompt, stdin, file }.
 	 *
 	 * spawnPortable wraps every Windows spawn in `cmd.exe /d /s /c "<line>"`, which caps the
 	 * command line at ~8191 chars and treats the prompt's newlines as command terminators. A
 	 * large or multi-line prompt (a multi-board plan, pasted meeting notes) is truncated there -
 	 * and because `-p <prompt>` comes before `--mcp-config` in the argv, the dropped tail is
 	 * exactly the flags that give the agent its board tools, so it launches tool-less and
-	 * silently draws nothing. When the agent can read stdin, hand it the prompt that way and
-	 * leave `-p` a short directive, so nothing large rides the command line.
+	 * silently draws nothing. The multi-board plan prompt always carries newlines, which is why
+	 * single-component generation (a short single line) worked while every board plan failed.
+	 *
+	 * Preferred fix: stage the prompt in a file and leave `-p` a short directive that tells the
+	 * agent to read it with its own read tool. Only the (short) directive rides the command line,
+	 * so neither length nor newlines can break it - and unlike stdin it does not depend on the
+	 * pipe surviving the cmd.exe wrapper (which, in practice, it does not). When the agent has no
+	 * read tool but can read stdin, fall back to that.
 	 *
 	 * macOS/Linux spawn the CLI directly (ARG_MAX is hundreds of KB), so the prompt stays inline
-	 * and unchanged. Set MFBRIDGE_FORCE_STDIN_PROMPT=1 to exercise the stdin path off Windows.
+	 * and unchanged. Set MFBRIDGE_FORCE_STDIN_PROMPT=1 to exercise the off-command-line path off
+	 * Windows (it selects file delivery when the agent supports it, else stdin).
 	 */
-	_deliverPrompt(rawPrompt) {
+	_deliverPrompt(rawPrompt, key) {
 		const text = String(rawPrompt == null ? '' : rawPrompt);
 		const force = process.env.MFBRIDGE_FORCE_STDIN_PROMPT === '1';
 		const risky = process.platform === 'win32' || force;
-		if (!risky || !this.agent.acceptsStdinPrompt) return { prompt: text, stdin: null };
-		// Short single-line prompts (the everyday chat turn) fit comfortably; leave them inline.
-		if (!force && text.length < 6000 && text.indexOf('\n') === -1) return { prompt: text, stdin: null };
-		return {
-			prompt: 'Carry out the task described on standard input exactly. If it lists items to create or '
-				+ 'render, produce every one of them, in order, using the mockflow tools, and do not ask for confirmation.',
-			stdin: text
-		};
+		const caps = (this.agent && this.agent.capabilities) || {};
+		if (!risky) return { prompt: text, stdin: null, file: null };
+		// Short single-line prompts (the everyday chat turn) fit comfortably on the cmd.exe
+		// line with no newline to break it; leave them inline.
+		if (!force && text.length < 6000 && text.indexOf('\n') === -1) return { prompt: text, stdin: null, file: null };
+
+		// Preferred: hand the prompt over as a file the agent reads with its own tool.
+		if (caps.promptFileTool) {
+			try {
+				const dir = path.join(config.HOME_DIR, 'bridge-prompts');
+				fs.mkdirSync(dir, { recursive: true });
+				const safe = String(key || 'turn').replace(/[^\w.-]/g, '_');
+				const p = path.join(dir, 'prompt-' + safe + '.txt');
+				fs.writeFileSync(p, text, 'utf8');
+				return {
+					// Single line, no newline: safe inline on the cmd.exe command line. The path
+					// may contain spaces but rides `-p` as one quoted argv arg, which is fine.
+					prompt: 'Your entire task is written in a file - read it with the ' + caps.promptFileTool
+						+ ' tool first, then carry out its instructions exactly, producing every listed item in order '
+						+ 'using the mockflow tools without asking for confirmation. The file is at this exact path: ' + p,
+					stdin: null,
+					file: { path: p, dir: dir, tool: caps.promptFileTool }
+				};
+			} catch (e) {
+				this.log('Could not stage prompt file, falling back: ' + (e && e.message));
+			}
+		}
+
+		// Fallback: stdin, for an agent that reads it but has no read tool.
+		if (caps.acceptsStdinPrompt) {
+			return {
+				prompt: 'Carry out the task described on standard input exactly. If it lists items to create or '
+					+ 'render, produce every one of them, in order, using the mockflow tools, and do not ask for confirmation.',
+				stdin: text,
+				file: null
+			};
+		}
+		return { prompt: text, stdin: null, file: null };
 	}
 
-	/** spawn(), writing the prompt to stdin first when _deliverPrompt routed it there. */
+	/**
+	 * Fold a file-delivery into a buildArgs turn: the agent needs its read tool on the
+	 * allowlist and read access to the folder the staged prompt lives in. No-op for the
+	 * inline and stdin paths. Returns the same turn object for chaining.
+	 */
+	_applyDelivery(turn, delivery) {
+		if (delivery && delivery.file) {
+			if (delivery.file.tool) {
+				turn.allowedTools = turn.allowedTools
+					? (turn.allowedTools + ',' + delivery.file.tool) : delivery.file.tool;
+			}
+			const dirs = (turn.extraDirs || []).slice();
+			if (delivery.file.dir && dirs.indexOf(delivery.file.dir) === -1) dirs.push(delivery.file.dir);
+			turn.extraDirs = dirs;
+		}
+		return turn;
+	}
+
+	/**
+	 * spawn(), writing the prompt to stdin first when _deliverPrompt routed it there,
+	 * and cleaning up a staged prompt file once the turn exits.
+	 */
 	_spawnWithPrompt(spec, delivery, opts) {
+		const self = this;
 		const spawnOpts = Object.assign({}, opts);
 		const viaStdin = delivery && delivery.stdin != null;
 		if (viaStdin) spawnOpts.stdio = ['pipe', 'pipe', 'pipe'];
@@ -299,6 +358,10 @@ class AgentManager {
 		if (viaStdin && proc.stdin) {
 			try { proc.stdin.write(delivery.stdin); proc.stdin.end(); }
 			catch (e) { this.log('Could not write prompt to agent stdin: ' + (e && e.message)); }
+		}
+		if (delivery && delivery.file && delivery.file.path) {
+			const p = delivery.file.path;
+			proc.on('close', function() { try { fs.unlinkSync(p); } catch (e) {} });
 		}
 		return proc;
 	}
@@ -525,8 +588,8 @@ class AgentManager {
 		// one that cannot simply starts fresh (its own turns still carry the
 		// conversation because the prompt is self-contained).
 		const canResume = this.agent.capabilities.resume === 'by-id';
-		const delivery = this._deliverPrompt(turnText);
-		const spec = this.agent.buildArgs({
+		const delivery = this._deliverPrompt(turnText, key);
+		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
 			projectid: tab.projectid,
 			prompt: delivery.prompt,
@@ -541,7 +604,7 @@ class AgentManager {
 			attachments: attachmentPaths,
 			resume: canResume ? session.sessionId : null,
 			partialMessages: true
-		});
+		}, delivery));
 
 		this.log('Local agent turn for board "' + (tab.title || key) + '"'
 			+ (session.sessionId ? ' (resumed session)' : ' (new session)')
@@ -833,8 +896,8 @@ class AgentManager {
 		}
 
 		const ws = this._effectiveWorkspace(tab);
-		const delivery = this._deliverPrompt(prompt);
-		const spec = this.agent.buildArgs({
+		const delivery = this._deliverPrompt(prompt, key);
+		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
 			projectid: tab.projectid,
 			prompt: delivery.prompt,
@@ -842,7 +905,7 @@ class AgentManager {
 			allowedTools: allowed,
 			mockflowTools: this._mockflowToolNames(),
 			partialMessages: false
-		});
+		}, delivery));
 
 		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
 			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + ws);
@@ -868,6 +931,12 @@ class AgentManager {
 		var stepCounter = 0;
 		var buf = '';
 		var toolCalled = false;
+		// File-delivered prompts (Windows large-prompt path): the agent's first tool call
+		// is the read that fetches the prompt, not component data. Skip it so it neither
+		// opens a stray timeline row nor trips toolCalled and suppresses the fallback.
+		var deliveryTool = (delivery.file && delivery.file.tool) || null;
+		var skipIds = {};
+		var pendingDeliveryRead = !!deliveryTool;
 
 		function handleLine(line) {
 			var events = self.agent.parseLine(line);
@@ -876,6 +945,11 @@ class AgentManager {
 				if (ev.type === 'model') {
 					self._noteModel(ev.id, hub);
 				} else if (ev.type === 'tool-start') {
+					if (pendingDeliveryRead && ev.name === deliveryTool) {
+						pendingDeliveryRead = false;
+						if (ev.id) skipIds[ev.id] = true;
+						continue;
+					}
 					toolCalled = true;
 					// Idempotent per tool id: an agent that announces a tool before it
 					// runs (and again when the call is complete) must not open two rows.
@@ -886,6 +960,7 @@ class AgentManager {
 							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
 					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
 				} else if (ev.type === 'tool-end') {
+					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; continue; }
 					var open = openSteps[ev.id];
 					if (open) {
 						delete openSteps[ev.id];
@@ -1023,8 +1098,8 @@ class AgentManager {
 		// writing it, so the step row appears immediately instead of after thousands
 		// of characters of HTML have streamed out (same reason the chat turn uses it).
 		const ws = this._effectiveWorkspace(tab);
-		const delivery = this._deliverPrompt(prompt);
-		const spec = this.agent.buildArgs({
+		const delivery = this._deliverPrompt(prompt, key);
+		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
 			projectid: tab.projectid,
 			prompt: delivery.prompt,
@@ -1032,11 +1107,11 @@ class AgentManager {
 			allowedTools: allowed,
 			mockflowTools: this._mockflowToolNames(),
 			partialMessages: true
-		});
+		}, delivery));
 
 		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
 			+ items.map(function(it) { return it.tool; }).join(', ') + ']'
-			+ (delivery.stdin != null ? ' (prompt via stdin)' : ''));
+			+ (delivery.file ? ' (prompt via file)' : delivery.stdin != null ? ' (prompt via stdin)' : ''));
 
 		var proc;
 		try {
@@ -1060,6 +1135,12 @@ class AgentManager {
 		var stepCounter = 0;
 		var itemCursor = 0;
 		var buf = '';
+		// When the prompt was delivered as a file (Windows large-plan path), the agent's
+		// first tool call is the read that fetches it - not a rendered item. Skip that one
+		// call so it neither steals item[0]'s timeline row nor counts toward stepCounter.
+		var deliveryTool = (delivery.file && delivery.file.tool) || null;
+		var skipIds = {};
+		var pendingDeliveryRead = !!deliveryTool;
 
 		function startStep(toolId, toolName) {
 			var id = toolId || ('pl_' + key + '_' + stepCounter);
@@ -1085,8 +1166,14 @@ class AgentManager {
 			for (var e = 0; e < events.length; e++) {
 				var ev = events[e];
 				if (ev.type === 'tool-start') {
+					if (pendingDeliveryRead && ev.name === deliveryTool) {
+						pendingDeliveryRead = false;
+						if (ev.id) skipIds[ev.id] = true;
+						continue;
+					}
 					startStep(ev.id, ev.name);
 				} else if (ev.type === 'tool-end') {
+					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; continue; }
 					var open = openSteps[ev.id];
 					if (!open) continue;
 					delete openSteps[ev.id];

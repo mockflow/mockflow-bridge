@@ -86,7 +86,12 @@ module.exports = {
 		// -p reads the prompt from argv, but piped stdin is available to the turn as
 		// context. On Windows that lets a large/multi-line prompt bypass the cmd.exe
 		// command line (8191-char limit + newline breakage) - see agentManager._deliverPrompt.
-		acceptsStdinPrompt: true
+		acceptsStdinPrompt: true,
+		// Preferred large-prompt delivery on Windows: stage the prompt in a file and
+		// have the agent read it with this tool. Unlike stdin it does not depend on the
+		// pipe surviving the cmd.exe wrapper, and unlike an inline prompt nothing large
+		// or multi-line rides the command line - see agentManager._deliverPrompt.
+		promptFileTool: 'Read'
 	},
 
 	detect() {
