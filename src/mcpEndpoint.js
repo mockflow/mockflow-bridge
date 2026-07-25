@@ -29,8 +29,11 @@ const INSTRUCTIONS =
 	+ 'open in their browser. Use the render_* tools whenever the user asks to create, '
 	+ 'visualize, plan, or diagram anything. Everything you render appears instantly on '
 	+ 'the board the user is looking at and is saved to their account - never output a '
-	+ 'URL or ask the user to open a link. When a request needs SEVERAL visualizations '
-	+ '(a plan, workspace, dashboard, or a multi-screen app), call plan_board with the '
+	+ 'URL or ask the user to open a link. One component wins over a plan: when a single '
+	+ 'render_* tool covers the request, call that tool, and a component that is itself '
+	+ 'multi-part (many screens, scenes or steps inside one artifact) is still one component. '
+	+ 'When a request needs SEVERAL DIFFERENT components '
+	+ '(a plan, workspace, dashboard or kit), call plan_board with the '
 	+ 'component list (each item carrying a self-contained brief) and STOP - the user '
 	+ 'confirms the list on their board and the chosen items are generated and arranged '
 	+ 'automatically, without you. Use read_board to see what is already on the board, '
@@ -106,11 +109,11 @@ const BRIDGE_TOOLS = [
 	// time, so connecting a new app never needs a bridge update.
 	{
 		name: 'declare_render',
-		description: 'FIRST STEP of a drawing request: say WHICH component you are about to create, before you create it. The render tools are deliberately not available to you yet - they appear once this is answered. Pass the render_* tool you intend to use. If the user is NOT asking for anything to be drawn (a question, a chat, an edit to something that already exists), pass "none" and carry on answering normally.',
+		description: 'FIRST STEP of a drawing request: say WHICH component you are about to create, before you create it. The render tools are deliberately not available to you yet - they appear once this is answered. Pass the render_* tool you intend to use, or "plan" when no single component covers the request and it needs several different ones. If the user is NOT asking for anything to be drawn (a question, a chat, an edit to something that already exists), pass "none" and carry on answering normally.',
 		inputSchema: {
 			type: 'object',
 			properties: {
-				tool: { type: 'string', description: 'The render_* tool you will use (e.g. "render_moodframe"), or "none" if this request does not draw anything.' }
+				tool: { type: 'string', description: 'The render_* tool you will use (e.g. "render_moodframe"), "plan" for several different components, or "none" if this request does not draw anything.' }
 			},
 			required: ['tool']
 		}
@@ -201,10 +204,17 @@ class McpEndpoint {
 			case 'tools/list': {
 				const declaring = typeof this.hub.getTurnPhase === 'function'
 					&& this.hub.getTurnPhase((ctx && ctx.boardId) || null) === 'declare';
+				const self5 = this;
 				// declare_render exists only while deciding. Offering it once the
 				// render tools are back invites a second, pointless declaration.
 				const bridgeTools = BRIDGE_TOOLS.filter(function(t) {
 					return declaring ? true : t.name !== 'declare_render';
+				}).map(function(t) {
+					// While deciding, the render tools are not in the list - so the
+					// agent cannot see what it is allowed to name. Give declare_render
+					// the menu, or it guesses ("render_colorpalette") and burns a call
+					// per guess until it stumbles on a real name.
+					return (declaring && t.name === 'declare_render') ? self5._declareToolDef() : t;
 				});
 				return { tools: this._toolDefsForTurn(ctx).concat(bridgeTools) };
 			}
@@ -234,6 +244,46 @@ class McpEndpoint {
 	 * this is called the mode is already known. An unanswered turn is the no-imagery
 	 * branch, which is what the agent should compose first anyway.
 	 */
+	/**
+	 * declare_render, with the menu of components it may name.
+	 *
+	 * Built from the catalog so it can never drift from what actually exists: the
+	 * enum makes an invented name impossible, and one line each is enough to pick
+	 * the right one. Deliberately short - the whole point of the deciding step is
+	 * that it does not carry the full catalog.
+	 */
+	_declareToolDef() {
+		const names = ['none', 'plan'];
+		const lines = [];
+		for (var i = 0; i < this.registry.length; i++) {
+			const e = this.registry[i];
+			if (!e.mcpToolName || e.mcpToolName.indexOf('render_') !== 0) continue;
+			names.push(e.mcpToolName);
+			var first = String(e.mcpDescription || '').split(/\n|(?<=\.)\s/)[0].trim();
+			if (first.length > 120) first = first.slice(0, 117) + '...';
+			lines.push(e.mcpToolName + ' - ' + first);
+		}
+		return {
+			name: 'declare_render',
+			description: 'FIRST STEP of a drawing request: say WHICH component you are about to create, before you '
+				+ 'create it. The render tools are deliberately not available to you yet - they appear once this is '
+				+ 'answered. Pass one of the names below EXACTLY as written; do not invent one. Name the ONE component '
+				+ 'that covers the request - a component that is itself multi-part (many screens, scenes or steps '
+				+ 'inside one artifact) is one component, so it belongs here, not in a plan. Pass "plan" when no single '
+				+ 'component can carry the request and it genuinely needs SEVERAL DIFFERENT ones (a plan, workspace, '
+				+ 'dashboard or kit): the drawing step then proposes the batch with plan_board. If the user is NOT '
+				+ 'asking for anything to be drawn (a question, a chat, a change to something already on the board), '
+				+ 'pass "none" and carry on answering normally.\n\nWhat you may name:\n' + lines.join('\n'),
+			inputSchema: {
+				type: 'object',
+				properties: {
+					tool: { type: 'string', enum: names, description: 'The render_* tool you will use, "plan" for several different components, or "none".' }
+				},
+				required: ['tool']
+			}
+		};
+	}
+
 	_toolDefsForTurn(ctx) {
 		const board = (ctx && ctx.boardId) || null;
 		// Decide-then-draw: in the declare step the agent gets NO render tools, so
@@ -297,21 +347,35 @@ class McpEndpoint {
 				case 'declare_render': {
 					const want = String(args.tool || '').trim();
 					if (!want || want === 'none') {
-						// Not a drawing request: the turn carries on as a normal answer.
+						// Not a drawing request: the turn carries on as a normal answer, and this
+						// step is the one that gives it - so it keeps the floor.
 						this.hub.setTurnPhase(board, 'compose');
+						this.hub.noteDeclared(board, 'none');
 						return this._ok('Nothing to draw - carry on and answer the user normally.');
+					}
+					if (want === 'plan') {
+						// No single component covers the request, so this turn draws a batch. The
+						// drawing step gets the full catalog and proposes it with plan_board. Imagery
+						// is not asked here: the plan picker carries its own toggle, next to the list
+						// it applies to.
+						this.hub.noteDeclared(board, 'plan');
+						this.hub.requestCompose(board);
+						return this._ok('Noted: several components. YOUR STEP IS OVER: call nothing else and '
+							+ 'write nothing at all. The drawing step is already starting with the render tools '
+							+ 'available, and it proposes the batch with plan_board itself. Nothing has failed and '
+							+ 'nothing is missing.');
 					}
 					const dEntry = this._entry(want);
 					if (!dEntry) {
 						return this._err('Unknown render tool "' + want + '". Name one of this server\'s render_* tools, '
-							+ 'or "none" if nothing is being drawn.');
+							+ '"plan" if the request needs several different components, or "none" if nothing is being drawn.');
 					}
 					const dLabel = dEntry.planUILabel || dEntry.planUIType
 						|| want.replace(/^render_/, '').replace(/_/g, ' ');
 					const self4 = this;
 					// Recorded now, not when the user answers: the deciding step's process
 					// may exit first, and its turn has to stay open for the drawing step.
-					this.hub.noteDeclared(board);
+					this.hub.noteDeclared(board, want);
 					const needsAsk = !!(dEntry.imageSlots || dEntry.mediaComponent)
 						&& this.hub.getImageChoice(board) === undefined;
 					if (needsAsk) {
@@ -327,8 +391,9 @@ class McpEndpoint {
 							+ 'Write nothing further now.');
 					}
 					this.hub.requestCompose(board);
-					return this._ok('Noted: a ' + dLabel + '. The drawing step starts now with the render tools '
-						+ 'available. Write nothing further in this step.');
+					return this._ok('Noted: a ' + dLabel + '. YOUR STEP IS OVER: call nothing else and write '
+						+ 'nothing at all. The drawing step is already starting with the render tools available, '
+						+ 'and it draws the component itself. Nothing has failed and nothing is missing.');
 				}
 
 				case 'read_board': {

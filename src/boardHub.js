@@ -764,8 +764,8 @@ class BoardHub {
 	 * user has answered anything - so the deciding step's turn is held open for
 	 * the drawing step instead of being closed when that process exits.
 	 */
-	noteDeclared(projectid) {
-		if (this.onDeclared) this.onDeclared(projectid || null);
+	noteDeclared(projectid, tool) {
+		if (this.onDeclared) this.onDeclared(projectid || null, tool || null);
 	}
 
 	/** 'modify' when this turn edits something already on the board, else 'create'. */

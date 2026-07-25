@@ -33,11 +33,14 @@ const PERSONA =
 	'You are Mida, MockFlow\'s AI assistant, chatting inside the user\'s live IdeaBoard. '
 	+ 'When a visual (diagram, chart, kanban, plan, mindmap, table...) would help, draw it '
 	+ 'on the board with the mockflow render tools - the user watches it appear instantly. '
-	+ 'When a request needs SEVERAL visualizations (a plan, workspace, dashboard, or a '
-	+ 'multi-screen app), call plan_board with the component list (each item carrying a '
-	+ 'self-contained brief) and stop - the user confirms the list on the board and the '
-	+ 'chosen items are generated and arranged automatically, without you. After calling '
-	+ 'plan_board just tell the user to review the list and click Generate Board. '
+	+ 'ONE component always wins over a plan: when a single render tool covers the request, '
+	+ 'call that tool, and remember that a component which is itself multi-part (many screens, '
+	+ 'scenes or steps inside one artifact) is still one component. Only when a request needs '
+	+ 'SEVERAL DIFFERENT components (a plan, workspace, dashboard or kit), call plan_board with '
+	+ 'the component list (each item carrying a self-contained brief) and stop - the user '
+	+ 'confirms the list on the board and the chosen items are generated and arranged '
+	+ 'automatically, without you. After calling plan_board just tell the user to review the '
+	+ 'list and click Generate Board. '
 	+ 'When the user asks to change, refine, add to or fix something that is already on the '
 	+ 'board, call modify_component with that component id (read_board lists the ids and labels) '
 	+ 'instead of rendering it again - a second render duplicates it rather than replacing it. '
@@ -630,11 +633,22 @@ class AgentManager {
 		// attachment, or the agent (notably Codex, which does not take extraDirs)
 		// parrots "restart with --workspace" and refuses to read the file it was handed.
 		var systemPrompt = PERSONA + RESEARCH_GUIDANCE + this._openImageTurn(hub, tab, frame);
+		// The drawing step of a decide-then-draw turn: the choice was already made (and
+		// the user answered the imagery question about THAT choice), so it is stated
+		// rather than left to be made a second time from the bare request.
+		if (!declarePhase && frame.__declared) {
+			systemPrompt += (frame.__declared === 'plan')
+				? ' You already decided this turn needs SEVERAL DIFFERENT components: call plan_board now '
+					+ 'with the component list and stop, and draw nothing yourself.'
+				: ' You already decided this turn draws ' + frame.__declared + ': call that tool now, and no '
+					+ 'other render tool, unless it answers with an error telling you otherwise.';
+		}
 		if (declarePhase) {
 			systemPrompt = PERSONA
 				+ ' RIGHT NOW you are in the deciding step of this turn, and you have NO drawing tools: '
 				+ 'they appear in the next step. Your ONLY job here is to call declare_render once, saying '
-				+ 'which render_* tool the request needs - or "none" when nothing is being drawn, in which '
+				+ 'which render_* tool the request needs - "plan" when no single component covers it and it '
+				+ 'needs several different ones, or "none" when nothing is being drawn, in which '
 				+ 'case simply answer the user as usual. When you do name a tool, write NO reply text at '
 				+ 'all: the drawing step follows immediately and speaks to the user itself.';
 		}
@@ -712,6 +726,10 @@ class AgentManager {
 		var replyText = '';
 		var openSteps = {};
 		var stepCounter = 0;
+		// Both steps of a decide-then-draw turn report into the SAME tab turn, and the
+		// drawing step is a fresh process whose counter starts at 0 again - so the phase
+		// goes in the id, or its first tool row lands on top of the deciding step's row.
+		const stepIdBase = 'la_' + turnId + (declarePhase ? '_d' : '_c');
 		var buf = '';
 
 		// Open one step row for a tool the moment we learn of it. Idempotent per
@@ -723,9 +741,9 @@ class AgentManager {
 			// board's timeline: the user cares about work that can happen, not about
 			// the agent probing its own toolbox.
 			if (!self._isRunnableTool(toolName, allowedTools)) return;
-			var id = toolId || ('la_' + turnId + '_' + stepCounter);
+			var id = toolId || (stepIdBase + stepCounter);
 			if (openSteps[id]) return;
-			var stepId = 'la_' + turnId + '_' + (stepCounter++);
+			var stepId = stepIdBase + (stepCounter++);
 			openSteps[id] = { stepId: stepId, started: Date.now() };
 			var label = toolStepLabel(toolName);
 			sendToTab({
@@ -751,6 +769,12 @@ class AgentManager {
 					replyText += (self.agent.capabilities.textChunks === 'delta')
 						? ev.text
 						: (replyText ? '\n\n' : '') + ev.text;
+					// The deciding step does not speak: it either names a component, and then the
+					// drawing step answers the user, or it says "none" and becomes the answer
+					// itself. Its text is held until that is known, so a preamble written just
+					// before declare_render never lands in the bubble the drawing step will fill.
+					var phSoFar = declarePhase ? self.chatPhases.get(key) : null;
+					var holdText = declarePhase && !(phSoFar && phSoFar.declaredNone);
 					// Only agents that really stream get to update the bubble mid-turn.
 					// A non-streaming agent emits its preamble ("I'll draw that now") as a
 					// finished message and then goes quiet for many seconds while it writes
@@ -758,7 +782,7 @@ class AgentManager {
 					// the turn looks finished and then jumps back to life when the drawing
 					// starts. Holding it keeps one honest "working" state until there is
 					// something to show. finish() flushes whatever was held.
-					if (self.agent.capabilities.streamsPartialText) {
+					if (!holdText && self.agent.capabilities.streamsPartialText) {
 						sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 					}
 				} else if (ev.type === 'tool-start') {
@@ -826,13 +850,16 @@ class AgentManager {
 			// The text a non-streaming agent produced was held back (see handleLine):
 			// deliver it as one delta first, so a tab that renders the bubble from
 			// deltas gets it whether or not it also reads chat-done.text.
-			if (!self.agent.capabilities.streamsPartialText && replyText) {
+			// ...as is text the deciding step held back. Not when this step is handing the
+			// turn over though: the drawing step speaks, and the held preamble is dropped.
+			if (replyText && !handingOver
+				&& (declarePhase || !self.agent.capabilities.streamsPartialText)) {
 				sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 			}
 			// The deciding step named a component, so this turn is only half over:
 			// hold the tab's turn open and let the drawing step continue it.
 			const ph = self.chatPhases.get(key);
-			if (ph && !ph.declared && ok && !String(replyText || '').trim()) {
+			if (ph && !ph.declared && !ph.declaredNone && ok && !String(replyText || '').trim()) {
 				self.log('[declare] deciding step said nothing - drawing the old way instead');
 				ph.declared = true;
 				ph.composeReady = true;
@@ -1183,10 +1210,22 @@ class AgentManager {
 	}
 
 	/** The agent named a component in the deciding step (hub.noteDeclared). */
-	noteDeclared(projectid) {
+	noteDeclared(projectid, tool) {
 		const key = this._chatPhaseKey(projectid);
 		const ph = key && this.chatPhases.get(key);
-		if (ph) ph.declared = true;
+		if (!ph) return;
+		if (tool === 'none') {
+			// Nothing is being drawn, so this step answers the user itself: its held text
+			// is released and the turn is NOT held open for a drawing step.
+			ph.declaredNone = true;
+			return;
+		}
+		ph.declared = true;
+		// WHAT was decided, not just that something was: the drawing step is a fresh
+		// process with none of the deciding step's conversation, so without this it
+		// picks the component again from the bare request and can land somewhere else
+		// than the choice the user was just asked about.
+		if (tool) ph.declaredTool = tool;
 	}
 
 	_chatPhaseKey(projectid) {
@@ -1207,6 +1246,7 @@ class AgentManager {
 		// composed the right way first time and nothing asks again.
 		const known = ph.hub.getImageChoice(ph.tab.projectid);
 		if (known === true || known === false) frame.withImages = known;
+		if (ph.declaredTool) frame.__declared = ph.declaredTool;
 		this.log('[declare] drawing step starting'
 			+ ((known === true || known === false) ? ' (images ' + (known ? 'on' : 'off') + ')' : ''));
 		try { this.handleChat(ph.tab, frame, ph.sendToTab, ph.hub); }
