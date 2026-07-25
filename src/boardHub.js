@@ -53,6 +53,7 @@ class BoardHub {
 		this.imageAsks = new Map();    // projectid -> in-flight ask promise (one question per turn)
 		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.turnModes = new Map();    // projectid -> 'create' | 'modify' (imagery rules differ)
+		this.turnPhases = new Map();   // projectid -> 'declare' | 'compose' (decide-then-draw)
 		this.selectedProjectId = null;
 		this.nextId = 1;
 
@@ -543,6 +544,10 @@ class BoardHub {
 					self.log('[plan] picker skipped on board ' + key);
 					return;
 				}
+				// The picker's image answer covers the whole batch: it is recorded
+				// BEFORE the generation turn starts, so that turn never has to stop
+				// and ask (which would abandon the items after the one that asked).
+				const batchImages = !!(res && res.withImages);
 				var chosen = items;                // auto reply (no picker UI) -> full plan
 				if (res && Array.isArray(res.items)) {
 					var sel = res.items.map(function(i) { return items[i]; }).filter(Boolean);
@@ -555,6 +560,7 @@ class BoardHub {
 				self.log('[plan] confirmed on board ' + key + ': ' + chosen.length + ' of ' + items.length
 					+ ' item(s) [' + chosen.map(function(it) { return it.tool; }).join(', ') + ']'
 					+ (res && res.auto ? ' (auto - no picker UI in the tab)' : ''));
+				self.setImageChoice(key, batchImages, 'mida', 'create');
 				return self.armPlan(projectid, boardTitle, chosen.length, sendToTab).then(function() {
 					// Opens Mida's generation loader before the agent turn spawns, so the
 					// chat never sits silent between the click and the first draw.
@@ -563,7 +569,7 @@ class BoardHub {
 						items: chosen.map(function(it) { return { name: it.name || '', tool: it.tool || '' }; })
 					});
 					if (self.onPlanGenerate)
-						self.onPlanGenerate(target.tab, { boardTitle: boardTitle, items: chosen }, sendToTab);
+						self.onPlanGenerate(target.tab, { boardTitle: boardTitle, items: chosen, withImages: batchImages }, sendToTab);
 					else
 						sendToTab({ t: 'plan-done', ok: false, error: 'Plan generation is not enabled on this bridge.' });
 				});
@@ -722,6 +728,44 @@ class BoardHub {
 		// instructions about imagery, so the turn's kind travels with the choice.
 		if (turnMode === 'modify') this.turnModes.set(key, 'modify');
 		else this.turnModes.delete(key);
+	}
+
+	/**
+	 * Which half of a decide-then-draw chat turn is running.
+	 *
+	 * 'declare' is served NO render tools, so the agent cannot compose - it can
+	 * only say what it intends, which is what makes the imagery question askable
+	 * before the work is done. Anything else (component AI, an external MCP
+	 * client, a plan batch) is 'compose' and sees the full catalog as always.
+	 */
+	setTurnPhase(projectid, phase) {
+		const key = projectid || null;
+		if (!key) return;
+		if (phase === 'declare') this.turnPhases.set(key, 'declare');
+		else this.turnPhases.delete(key);
+	}
+
+	getTurnPhase(projectid) {
+		const key = projectid || null;
+		return (key && this.turnPhases.get(key) === 'declare') ? 'declare' : 'compose';
+	}
+
+	/**
+	 * The declare step is finished with (the user has answered, or there was
+	 * nothing to ask): run the drawing step of the same chat turn. Wired to the
+	 * agent manager by the daemon, like onPlanGenerate.
+	 */
+	requestCompose(projectid) {
+		if (this.onCompose) this.onCompose(projectid || null);
+	}
+
+	/**
+	 * The agent has named what it will draw. Recorded straight away - before the
+	 * user has answered anything - so the deciding step's turn is held open for
+	 * the drawing step instead of being closed when that process exits.
+	 */
+	noteDeclared(projectid) {
+		if (this.onDeclared) this.onDeclared(projectid || null);
 	}
 
 	/** 'modify' when this turn edits something already on the board, else 'create'. */

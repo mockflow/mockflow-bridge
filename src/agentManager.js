@@ -123,6 +123,10 @@ class AgentManager {
 		this.compgenProcs = new Map(); // key -> child process (component-AI turns)
 		this.planProcs = new Map();    // key -> child process (plan_board continuation turns)
 		this.imageProcs = new Map();   // key -> child process (image re-render turns)
+		// A chat turn in its decide-then-draw form: the declare step's context,
+		// kept so the drawing step can continue the SAME tab turn (same id, same
+		// bubble) once the user has answered.
+		this.chatPhases = new Map();   // key -> { tab, frame, sendToTab, hub, declared, phase1Done, composeReady }
 		this.available = null;        // cached detection for the selected agent
 	}
 
@@ -600,6 +604,21 @@ class AgentManager {
 		const prevSelected = hub.selectedProjectId;
 		if (tab.projectid) hub.selectedProjectId = tab.projectid;
 
+		// Decide-then-draw. The FIRST step of a chat turn runs with no render
+		// tools, so the agent can only say what it means to draw - which is what
+		// lets the imagery question be answered BEFORE the component is composed,
+		// instead of composing it once, asking, and composing it again. The second
+		// step is this same method re-entered with the tools available; the tab
+		// never sees two turns, because no chat-done is sent in between.
+		const declarePhase = frame.__phase !== 'compose';
+		hub.setTurnPhase(tab.projectid, declarePhase ? 'declare' : 'compose');
+		if (declarePhase) {
+			this.chatPhases.set(key, {
+				tab: tab, frame: frame, sendToTab: sendToTab, hub: hub,
+				declared: false, phase1Done: false, composeReady: false
+			});
+		}
+
 		// The folder this turn runs in. A basic-plan tab gets the scratch dir even
 		// when --workspace is set (workspace file reading is a Pro feature).
 		const ws = this._effectiveWorkspace(tab);
@@ -611,6 +630,14 @@ class AgentManager {
 		// attachment, or the agent (notably Codex, which does not take extraDirs)
 		// parrots "restart with --workspace" and refuses to read the file it was handed.
 		var systemPrompt = PERSONA + RESEARCH_GUIDANCE + this._openImageTurn(hub, tab, frame);
+		if (declarePhase) {
+			systemPrompt = PERSONA
+				+ ' RIGHT NOW you are in the deciding step of this turn, and you have NO drawing tools: '
+				+ 'they appear in the next step. Your ONLY job here is to call declare_render once, saying '
+				+ 'which render_* tool the request needs - or "none" when nothing is being drawn, in which '
+				+ 'case simply answer the user as usual. When you do name a tool, write NO reply text at '
+				+ 'all: the drawing step follows immediately and speaks to the user itself.';
+		}
 		if (!this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
@@ -658,7 +685,10 @@ class AgentManager {
 			// confined to the workspace (opencode) attaches them to the message
 			// instead. Empty when nothing was attached.
 			attachments: attachmentPaths,
-			resume: canResume ? session.sessionId : null,
+			// The deciding step is ephemeral - it must NOT resume the user's
+			// conversation, or the drawing step inherits an exchange whose last
+			// instruction was "you have no drawing tools, write nothing".
+			resume: (canResume && !declarePhase) ? session.sessionId : null,
 			partialMessages: true
 		}, delivery));
 
@@ -709,7 +739,10 @@ class AgentManager {
 			for (var e = 0; e < events.length; e++) {
 				var ev = events[e];
 				if (ev.type === 'session') {
-					if (!session.sessionId) session.sessionId = ev.id;
+					// ...and it must not BECOME the conversation either: the id it
+					// reports is thrown away, so the drawing step and every later turn
+					// continue the real one.
+					if (!declarePhase && !session.sessionId) session.sessionId = ev.id;
 				} else if (ev.type === 'model') {
 					self._noteModel(ev.id, hub);
 				} else if (ev.type === 'text') {
@@ -780,10 +813,12 @@ class AgentManager {
 			session.busy = false;
 			session.proc = null;
 			hub.selectedProjectId = prevSelected;
+			const handingOver = !!(self.chatPhases.get(key) || {}).declared && ok;
 			// The image answer belonged to THIS turn. Clearing it means the next
 			// turn - including one from an agent outside the editor - asks again
-			// rather than inheriting permission to spend credits.
-			hub.setImageChoice(tab.projectid, undefined);
+			// rather than inheriting permission to spend credits. The two steps of
+			// one decide-then-draw turn are NOT two turns, so the handover keeps it.
+			if (!handingOver) hub.setImageChoice(tab.projectid, undefined);
 			// Close any dangling step rows so the timeline never spins forever.
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
@@ -794,6 +829,21 @@ class AgentManager {
 			if (!self.agent.capabilities.streamsPartialText && replyText) {
 				sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 			}
+			// The deciding step named a component, so this turn is only half over:
+			// hold the tab's turn open and let the drawing step continue it.
+			const ph = self.chatPhases.get(key);
+			if (ph && !ph.declared && ok && !String(replyText || '').trim()) {
+				self.log('[declare] deciding step said nothing - drawing the old way instead');
+				ph.declared = true;
+				ph.composeReady = true;
+			}
+			if (ph && ph.declared && ok) {
+				ph.phase1Done = true;
+				self.log('[declare] deciding step finished, waiting to draw');
+				if (ph.composeReady) self._runComposePhase(key);
+				return;
+			}
+			if (ph) self.chatPhases.delete(key);
 			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error, model: self.currentModel || null });
 		}
 
@@ -822,6 +872,14 @@ class AgentManager {
 			if (key !== boardKey && key.indexOf(boardKey + '::') !== 0) return;
 			if (session && session.proc) killProcTree(session.proc);
 		});
+		// A turn waiting between its deciding and drawing steps has no process to
+		// kill, and its tab turn is deliberately still open - close it here or the
+		// chat waits for a draw that is never coming.
+		const ph = this.chatPhases.get(boardKey);
+		if (ph) {
+			this.chatPhases.delete(boardKey);
+			try { ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: true, text: '' }); } catch (e) {}
+		}
 	}
 
 	/**
@@ -1111,6 +1169,54 @@ class AgentManager {
 	}
 
 	/**
+	 * The user answered (or there was nothing to ask): run the drawing step of a
+	 * chat turn that already declared what it is making. Called via the hub, and
+	 * safe to call before the deciding step's process has exited - whichever
+	 * happens second starts the draw.
+	 */
+	resumeCompose(projectid) {
+		const key = this._chatPhaseKey(projectid);
+		const ph = key && this.chatPhases.get(key);
+		if (!ph) return;
+		ph.composeReady = true;
+		if (ph.phase1Done) this._runComposePhase(key);
+	}
+
+	/** The agent named a component in the deciding step (hub.noteDeclared). */
+	noteDeclared(projectid) {
+		const key = this._chatPhaseKey(projectid);
+		const ph = key && this.chatPhases.get(key);
+		if (ph) ph.declared = true;
+	}
+
+	_chatPhaseKey(projectid) {
+		var key = null;
+		this.chatPhases.forEach(function(v, k) {
+			if (!key && (v.tab.projectid === projectid || k === projectid)) key = k;
+		});
+		return key;
+	}
+
+	/** Re-enter handleChat with the render tools available, same tab turn. */
+	_runComposePhase(key) {
+		const ph = this.chatPhases.get(key);
+		if (!ph) return;
+		this.chatPhases.delete(key);
+		const frame = Object.assign({}, ph.frame, { __phase: 'compose' });
+		// The answer the user just gave travels into the drawing step, so it is
+		// composed the right way first time and nothing asks again.
+		const known = ph.hub.getImageChoice(ph.tab.projectid);
+		if (known === true || known === false) frame.withImages = known;
+		this.log('[declare] drawing step starting'
+			+ ((known === true || known === false) ? ' (images ' + (known ? 'on' : 'off') + ')' : ''));
+		try { this.handleChat(ph.tab, frame, ph.sendToTab, ph.hub); }
+		catch (e) {
+			this.log('[declare] drawing step failed to start: ' + (e && e.message));
+			ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: false, error: 'The drawing step could not start.' });
+		}
+	}
+
+	/**
 	 * Re-render one component WITH image slots, after the user answered the
 	 * "generate images?" question.
 	 *
@@ -1269,10 +1375,11 @@ class AgentManager {
 			+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
 			+ 'the plan, do not chat, and never output a URL or a link.';
 
-		// A confirmed plan is its own turn, so it starts with no image answer
-		// carried over: the first image-capable item in the batch asks the user
-		// once, and every later item reuses that answer.
-		systemPrompt += this._openImageTurn(hub, tab, { surface: 'mida' });
+		// The picker already asked about imagery for the whole batch, so this turn
+		// starts with the answer in hand. askable:false is the important half - a
+		// batch must NEVER stop to ask, because ending the turn mid-plan abandons
+		// every item after the one that asked (and with them the auto-arrange).
+		systemPrompt += this._openImageTurn(hub, tab, { surface: 'mida', withImages: !!plan.withImages }, false);
 
 		// Same gate as the component path: when the plan contains a real-world /
 		// current-data component (catalog `webResearch`), let the agent ground the

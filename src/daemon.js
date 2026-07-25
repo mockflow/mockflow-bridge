@@ -74,6 +74,10 @@ async function start(opts) {
 	// The user said yes to images on a component that was already rendered without
 	// them: a fresh turn renders it again with image slots (nothing waited).
 	hub.onImageRerender = function(tab, req, sendToTab) { agents.handleImageRerender(tab, req, hub, sendToTab); };
+	// Decide-then-draw: the agent said what it will draw, then (once any question
+	// is answered) the drawing step of that same chat turn runs.
+	hub.onDeclared = function(projectid) { agents.noteDeclared(projectid); };
+	hub.onCompose = function(projectid) { agents.resumeCompose(projectid); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly
 	// (only offer "brainstorm your files" when a workspace is actually set).

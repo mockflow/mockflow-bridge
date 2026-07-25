@@ -105,6 +105,17 @@ const BRIDGE_TOOLS = [
 	// machine. Deliberately generic: the tool list comes from MockFlow at call
 	// time, so connecting a new app never needs a bridge update.
 	{
+		name: 'declare_render',
+		description: 'FIRST STEP of a drawing request: say WHICH component you are about to create, before you create it. The render tools are deliberately not available to you yet - they appear once this is answered. Pass the render_* tool you intend to use. If the user is NOT asking for anything to be drawn (a question, a chat, an edit to something that already exists), pass "none" and carry on answering normally.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				tool: { type: 'string', description: 'The render_* tool you will use (e.g. "render_moodframe"), or "none" if this request does not draw anything.' }
+			},
+			required: ['tool']
+		}
+	},
+	{
 		name: 'list_source_tools',
 		description: 'List the tools available for the connected data sources the user applied to this request (Notion, Jira, Slack, GitHub, ...). Call this FIRST whenever the user refers to their own content ("my doc", "my issues", "my tickets") - it tells you what you can search and fetch. Returns tool names with one-line descriptions; use describe_source_tool for a schema and call_source_tool to run one.',
 		inputSchema: { type: 'object', properties: {} }
@@ -187,8 +198,16 @@ class McpEndpoint {
 				};
 			case 'ping':
 				return {};
-			case 'tools/list':
-				return { tools: this._toolDefsForTurn(ctx).concat(BRIDGE_TOOLS) };
+			case 'tools/list': {
+				const declaring = typeof this.hub.getTurnPhase === 'function'
+					&& this.hub.getTurnPhase((ctx && ctx.boardId) || null) === 'declare';
+				// declare_render exists only while deciding. Offering it once the
+				// render tools are back invites a second, pointless declaration.
+				const bridgeTools = BRIDGE_TOOLS.filter(function(t) {
+					return declaring ? true : t.name !== 'declare_render';
+				});
+				return { tools: this._toolDefsForTurn(ctx).concat(bridgeTools) };
+			}
 			case 'tools/call':
 				return this._toolsCall(params || {}, ctx);
 			case 'resources/list':
@@ -217,6 +236,10 @@ class McpEndpoint {
 	 */
 	_toolDefsForTurn(ctx) {
 		const board = (ctx && ctx.boardId) || null;
+		// Decide-then-draw: in the declare step the agent gets NO render tools, so
+		// it cannot compose anything. That is what makes the imagery question
+		// answerable before the work is done rather than after it.
+		if (typeof this.hub.getTurnPhase === 'function' && this.hub.getTurnPhase(board) === 'declare') return [];
 		const on = this.hub.getImageChoice(board) === true;
 		const modify = (typeof this.hub.getTurnMode === 'function')
 			&& this.hub.getTurnMode(board) === 'modify';
@@ -269,6 +292,43 @@ class McpEndpoint {
 					}
 					this.hub.selectedProjectId = args.projectid;
 					return this._ok('Now drawing on board "' + args.projectid + '".');
+				}
+
+				case 'declare_render': {
+					const want = String(args.tool || '').trim();
+					if (!want || want === 'none') {
+						// Not a drawing request: the turn carries on as a normal answer.
+						this.hub.setTurnPhase(board, 'compose');
+						return this._ok('Nothing to draw - carry on and answer the user normally.');
+					}
+					const dEntry = this._entry(want);
+					if (!dEntry) {
+						return this._err('Unknown render tool "' + want + '". Name one of this server\'s render_* tools, '
+							+ 'or "none" if nothing is being drawn.');
+					}
+					const dLabel = dEntry.planUILabel || dEntry.planUIType
+						|| want.replace(/^render_/, '').replace(/_/g, ' ');
+					const self4 = this;
+					// Recorded now, not when the user answers: the deciding step's process
+					// may exit first, and its turn has to stay open for the drawing step.
+					this.hub.noteDeclared(board);
+					const needsAsk = !!(dEntry.imageSlots || dEntry.mediaComponent)
+						&& this.hub.getImageChoice(board) === undefined;
+					if (needsAsk) {
+						// Ask NOW, before anything is composed. The drawing step starts
+						// when they answer.
+						this.hub.askImages(board, {
+							toolName: want, label: dLabel,
+							kind: dEntry.mediaComponent ? 'component' : 'slots'
+						}).then(function() { self4.hub.requestCompose(board); })
+						  .catch(function() { self4.hub.requestCompose(board); });
+						return this._ok('Noted: a ' + dLabel + '. The user is being asked whether it should include '
+							+ 'AI-generated images, and the drawing step starts by itself as soon as they answer. '
+							+ 'Write nothing further now.');
+					}
+					this.hub.requestCompose(board);
+					return this._ok('Noted: a ' + dLabel + '. The drawing step starts now with the render tools '
+						+ 'available. Write nothing further in this step.');
 				}
 
 				case 'read_board': {
@@ -353,6 +413,14 @@ class McpEndpoint {
 					// user's Generate Board click later arms the auto-arrange plan and
 					// starts the generation turn (hub.onPlanGenerate -> agent manager);
 					// until they decide, the hub refuses draws on the board.
+					// Tell the picker which items can carry imagery, so the question is
+					// asked there - with the whole list in front of the user - instead of
+					// mid-batch, where ending the turn would abandon the remaining items.
+					const self3 = this;
+					items.forEach(function(it) {
+						const e = self3._entry(it && it.tool);
+						if (e && (e.imageSlots || e.mediaComponent)) it.imageCapable = true;
+					});
 					this.hub.startPlanPick(board, title, items);
 					return this._ok('The plan (' + items.length + ' components under "' + title + '") is now on '
 						+ 'the user\'s screen for review. YOUR TURN IS COMPLETE: do not render anything and do '
