@@ -41,7 +41,24 @@ const INSTRUCTIONS =
 	+ 'rather than answering from memory. '
 	+ 'Changing something that is ALREADY on the board is modify_component, never a second '
 	+ 'render: read_board gives you each component id, its label and whether it can be edited. '
-	+ 'Re-rendering a component you drew earlier does not replace it, it duplicates it.';
+	+ 'Re-rendering a component you drew earlier does not replace it, it duplicates it. '
+	+ 'You cannot paint a picture, film a clip, make a sound or build a 3D mesh yourself - but you do '
+	+ 'not have to: render_image, render_video, render_audio and render_3dmodel take YOUR prompt and '
+	+ 'have MockFlow AI generate the asset in the user\'s browser. Use them whenever the user asks '
+	+ 'for one, and write a vivid, self-contained prompt - that prompt is your whole contribution, '
+	+ 'because the generator never sees this conversation. They cost the user AI credits, so the user '
+	+ 'confirms before each one runs. Never stand in a design, moodboard or any other component for a '
+	+ 'request for a picture, and never tell the user MockFlow cannot make one. (Some render tools '
+	+ 'also carry AI-generated imagery INSIDE the component they compose - that is a slot in a larger '
+	+ 'component, not a way to answer a request for a picture.)';
+
+// What imagery means on a MODIFY, whatever the component. Deliberately not
+// per-component: "keep what is there" is the same instruction for a moodboard,
+// a design and a document, and it is the opposite of the create-time rules.
+const MODIFY_IMAGERY =
+	'THIS IS A MODIFY of something already on the board, so its EXISTING imagery stays. Copy every '
+	+ 'image reference you were given across exactly as it is and give it no new prompt - never drop a '
+	+ 'picture that is already there, and never replace a real picture with a placeholder.';
 
 const BRIDGE_TOOLS = [
 	{
@@ -171,7 +188,7 @@ class McpEndpoint {
 			case 'ping':
 				return {};
 			case 'tools/list':
-				return { tools: this.registry.getToolDefinitions().concat(BRIDGE_TOOLS) };
+				return { tools: this._toolDefsForTurn(ctx).concat(BRIDGE_TOOLS) };
 			case 'tools/call':
 				return this._toolsCall(params || {}, ctx);
 			case 'resources/list':
@@ -181,6 +198,49 @@ class McpEndpoint {
 			default:
 				throw new Error('Method not found: ' + method);
 		}
+	}
+
+	/**
+	 * The tool list for THIS turn.
+	 *
+	 * A component that can carry imagery is composed differently depending on
+	 * whether it has any - a moodboard built around photo tiles is not the same
+	 * layout as one built from colour and type. So each such tool's description
+	 * gets exactly ONE of its two branches appended: the mode this turn is in.
+	 * The agent never reads the rules for the mode it is not in, which is how the
+	 * server generators do it (one prompt, the applicable half appended).
+	 *
+	 * Every turn is a fresh agent process and therefore a fresh tools/list, and
+	 * the user's answer is recorded before the process is spawned - so by the time
+	 * this is called the mode is already known. An unanswered turn is the no-imagery
+	 * branch, which is what the agent should compose first anyway.
+	 */
+	_toolDefsForTurn(ctx) {
+		const board = (ctx && ctx.boardId) || null;
+		const on = this.hub.getImageChoice(board) === true;
+		const modify = (typeof this.hub.getTurnMode === 'function')
+			&& this.hub.getTurnMode(board) === 'modify';
+		const self = this;
+		return this.registry.getToolDefinitions().map(function(def) {
+			const entry = self._entry(def.name);
+			if (!entry || !entry.imageSlots) return def;
+			// A component's two branches are COMPOSITION rules - they describe how to
+			// build the thing. Editing one that already exists is a different
+			// instruction entirely, and the same one for every component: whatever
+			// imagery is already there stays. Without this, "no imagery" reads as
+			// "delete the pictures" on a modify.
+			var branch;
+			if (modify) {
+				branch = MODIFY_IMAGERY + (on
+					? ' You may add NEW pictures where the change calls for one, following these rules:\n\n'
+						+ (entry.imagesOnGuidance || '')
+					: ' Add no NEW pictures.');
+			} else {
+				branch = on ? entry.imagesOnGuidance : entry.imagesOffGuidance;
+			}
+			if (!branch) return def;
+			return Object.assign({}, def, { description: def.description + '\n\n' + branch });
+		});
 	}
 
 	async _toolsCall(params, ctx) {
@@ -373,6 +433,26 @@ class McpEndpoint {
 		const shapeErr = this._checkArgs(name, args);
 		if (shapeErr) return this._err(shapeErr);
 
+		if (entry.clientServerGenerate) {
+			// The asset is made by a MockFlow generator running in the user's tab,
+			// from the prompt this agent wrote. It costs credits and can take a
+			// while, so the tab fires it and answers at once.
+			const kind = name.replace('render_', '');
+			await this.hub.drawServerGen(board, name, {
+				aitype: entry.clientAitype,
+				args: args,
+				tocomp: entry.clientToComp || null,
+				promptPrefix: entry.clientPromptPrefix || '',
+				// Extra request fields this generator needs (catalog-driven, so a
+				// new media type declares its own without any code here).
+				extra: entry.clientGenExtra || null
+			});
+			if (meter) this._recordGen(board);
+			return this._ok('MockFlow AI is generating the ' + kind + ' from your prompt and it appears on '
+				+ 'the user\'s board when it is ready. You are done: do not call any more tools, do not '
+				+ 'render anything else, and never output a URL or a link. Tell the user it is generating.');
+		}
+
 		// Same pre-flight sanitization the desktop and web MCP servers run.
 		if (name === 'render_flowchart' || name === 'render_swimlane' || name === 'render_cloudarchitecture') {
 			if (typeof this.registry.sanitizeFlowData === 'function') {
@@ -423,29 +503,54 @@ class McpEndpoint {
 	 * question in front of a user on one side and a stalled agent on the other,
 	 * with every agent CLI's own call ceiling deciding who gave up first.
 	 *
-	 * Entirely catalog-driven (imageSlots / imageSlotGuidance), so a component
+	 * Entirely catalog-driven (imageSlots / imagesOnGuidance), so a component
 	 * gains the whole flow by declaring it - no tool names live here.
 	 *
 	 * @returns {string|null} the message to end this turn with, or null when the
 	 *          call may proceed and draw right now.
 	 */
 	_imageGate(board, entry, name, args) {
-		if (!entry || !entry.imageSlots) return null;
-		const before = this.hub.getImageChoice(board);
-		// Already answered for this turn: draw. When the answer was yes, the agent
-		// was told how to fill the slots (its system prompt at turn start, or the
-		// re-render turn below) and this call is its response to that.
-		if (before === true || before === false) return null;
+		if (!entry) return null;
+		// Two shapes of the same question. A component with image SLOTS can be drawn
+		// either way (the imagery is optional decoration inside it); a MEDIA
+		// component IS the asset, so a no means it is not drawn at all.
+		const kind = entry.mediaComponent ? 'component' : (entry.imageSlots ? 'slots' : null);
+		if (!kind) return null;
 
-		const label = entry.planUILabel || String(name).replace(/^render_/, '').replace(/_/g, ' ');
+		const before = this.hub.getImageChoice(board);
+		// Already answered for this turn: act on it. When the answer was yes, the
+		// agent was told how to fill the slots (its system prompt at turn start, or
+		// the re-render turn below) and this call is its response to that.
+		if (before === true) return null;
+		if (before === false) {
+			// Slots are optional, so the component still draws without them. A media
+			// component is nothing but the asset, so there is nothing left to draw.
+			if (kind === 'slots') return null;
+			return 'The user chose not to spend AI credits on this, so nothing was generated. Tell them '
+				+ 'plainly that the ' + String(name).replace(/^render_/, '') + ' was not created, and do '
+				+ 'not try again unless they ask.';
+		}
+
+		// What this component is CALLED to a person: the catalog's own plan-picker
+		// type where it has one (render_moodframe is a "moodboard", not a
+		// "moodframe"), since this label is read by the user on the ask card and
+		// by the agent in the re-render prompt.
+		const label = entry.planUILabel || entry.planUIType
+			|| String(name).replace(/^render_/, '').replace(/_/g, ' ');
 		const self = this;
-		// The component the agent authored is kept as-is. If the user says no it is
-		// drawn exactly like this - the agent never has to produce it twice.
-		const pending = { toolName: name, args: args, entry: entry, label: label };
-		this.hub.askImages(board, { toolName: name, label: label })
+		// What the agent authored is kept as-is: for slots it is drawn unchanged if
+		// the user says no, and for a media component it is the prompt to generate.
+		const pending = { toolName: name, args: args, entry: entry, label: label, kind: kind };
+		this.hub.askImages(board, { toolName: name, label: label, kind: kind })
 			.then(function(on) { return self._afterImageAnswer(board, pending, on); })
 			.catch(function(err) { self.log('[images] resume failed: ' + (err && err.message)); });
 
+		if (kind === 'component') {
+			return 'Only MockFlow AI can generate a ' + label + ', and it uses the user\'s AI credits, so '
+				+ 'they are being asked to confirm. YOUR TURN IS COMPLETE: do not call any more tools - the '
+				+ label + ' is generated automatically as soon as they confirm. Briefly tell the user to '
+				+ 'confirm on their board, and never output a URL or a link.';
+		}
 		return 'The user is choosing whether this ' + label + ' should include AI-generated images '
 			+ '(only MockFlow can generate pictures, and they use the user\'s AI credits). YOUR TURN IS '
 			+ 'COMPLETE: do not render anything and do not call any more tools - the ' + label + ' is drawn '
@@ -464,12 +569,23 @@ class McpEndpoint {
 	 *           exactly what it sent, plus this tool's slot instructions.
 	 */
 	_afterImageAnswer(board, pending, on) {
+		// A media component IS the asset: yes generates it from the prompt the agent
+		// already wrote (no agent re-runs), no means nothing is created.
+		if (pending.kind === 'component') {
+			if (!on) {
+				this.log('[images] the user declined the ' + pending.label + ' - nothing generated');
+				return;
+			}
+			this.log('[images] generating the ' + pending.label + ' the user confirmed');
+			return this._draw(board, pending.entry, pending.toolName, pending.args, true)
+				.catch(function() {});
+		}
 		if (on) {
 			this.hub.requestImageRerender(board, {
 				toolName: pending.toolName,
 				args: pending.args,
 				label: pending.label,
-				guidance: pending.entry.imageSlotGuidance || ''
+				guidance: pending.entry.imagesOnGuidance || ''
 			});
 			return;
 		}
