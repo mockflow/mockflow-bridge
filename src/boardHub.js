@@ -49,6 +49,9 @@ class BoardHub {
 		this.convertContext = new Map(); // projectid -> fromconvert eid (Convert AI turns)
 		this.plans = new Map();     // projectid -> {boardTitle, remaining, expires} (plan_board batches)
 		this.pendingPicks = new Map(); // projectid -> {promise, decided, boardTitle, items} (plan selection)
+		this.imageChoices = new Map(); // projectid -> true|false (this turn's "generate images" answer)
+		this.imageAsks = new Map();    // projectid -> in-flight ask promise (one question per turn)
+		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.selectedProjectId = null;
 		this.nextId = 1;
 
@@ -428,7 +431,7 @@ class BoardHub {
 	 * otherwise draw it as a normal new component (per-board serialized).
 	 * @returns {Promise<{captured:boolean}|any>}
 	 */
-	captureOrDraw(projectid, toolName, gdata) {
+	captureOrDraw(projectid, toolName, gdata, imageSlotForm, imagesAllowed) {
 		var key = projectid;
 		if (!key) {
 			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
@@ -436,7 +439,10 @@ class BoardHub {
 		var cap = key ? this.captures.get(key) : null;
 		if (cap) {
 			this.captures.delete(key);
-			cap.send({ t: 'compgen-data', id: cap.turnId, gdata: gdata });
+			// imageSlotForm travels with the data: the tab fills any image slot the
+			// agent left in it before the component is filled in place.
+			cap.send({ t: 'compgen-data', id: cap.turnId, gdata: gdata,
+				imageSlotForm: imageSlotForm || null, imagesAllowed: !!imagesAllowed });
 			return Promise.resolve({ captured: true });
 		}
 		// A plan selection is still in front of the user: refuse the draw instead
@@ -452,7 +458,8 @@ class BoardHub {
 		var conv = key ? this.convertContext.get(key) : null;
 		if (conv && gdata && gdata.data) gdata.data.fromconvert = conv;
 		const self = this;
-		return this.runOnBoard(projectid, { t: 'tool', toolName: toolName, gdata: gdata })
+		return this.runOnBoard(projectid, { t: 'tool', toolName: toolName, gdata: gdata,
+			imageSlotForm: imageSlotForm || null, imagesAllowed: !!imagesAllowed })
 			.then(function(res) {
 				return self._notePlannedDraw(key).then(function(arranged) { return arranged || res; });
 			});
@@ -621,7 +628,7 @@ class BoardHub {
 	 * while a capture is armed can only be an unrelated Mode A agent, and drawing
 	 * normally is correct and leaves the armed turn intact.
 	 */
-	drawHtml(projectid, toolName, mcpType, args) {
+	drawHtml(projectid, toolName, mcpType, args, imagesAllowed) {
 		var key = projectid;
 		if (!key) {
 			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
@@ -633,7 +640,7 @@ class BoardHub {
 				+ 'STOP: do not render anything. Generation starts automatically when the user clicks '
 				+ 'Generate Board; your part ended when you proposed the plan.'));
 		}
-		const frame = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {} };
+		const frame = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {}, imagesAllowed: !!imagesAllowed };
 		// Convert AI: tag the drawn component with its source so the client connects
 		// and positions it relative to the source (parity with captureOrDraw).
 		const conv = key ? this.convertContext.get(key) : null;
@@ -648,6 +655,119 @@ class BoardHub {
 					return arranged || res;
 				});
 			});
+	}
+
+	// ---- image slots ---------------------------------------------------------
+	//
+	// A local agent is a text model: it can author a component but not the imagery
+	// inside it. MockFlow can generate that imagery, in the user's tab, against
+	// their AI credits - so it is their call, every turn. The choice is asked ONCE
+	// per turn, at the moment the agent actually reaches an image-capable tool
+	// (the tab has no way to know the component type before then, because the
+	// agent picks it), and every later tool in the same turn reuses the answer.
+
+	/**
+	 * Start a turn's image state: the answer the tab already sent (undefined when
+	 * the user has not said, which is what makes the mid-turn ask happen), and the
+	 * surface that turn came from, so the question is asked where the user is
+	 * looking (Ask Mida, or the Concept Builder that is talking).
+	 */
+	setImageChoice(projectid, choice, surface) {
+		const key = projectid || null;
+		if (!key) return;
+		if (choice === true || choice === false) this.imageChoices.set(key, choice);
+		else this.imageChoices.delete(key);
+		this.imageAsks.delete(key);
+		if (surface) this.turnSurfaces.set(key, surface);
+		else this.turnSurfaces.delete(key);
+	}
+
+	getImageChoice(projectid) {
+		const key = projectid || null;
+		if (!key) return undefined;
+		return this.imageChoices.has(key) ? this.imageChoices.get(key) : undefined;
+	}
+
+	/**
+	 * Ask the board tab whether this turn should include AI-generated images.
+	 * Resolves to a boolean and remembers it for the rest of the turn. Concurrent
+	 * tool calls share the one question.
+	 *
+	 * NOTHING WAITS ON THIS. The agent's tool call returns the moment the question
+	 * is sent (see mcpEndpoint._imageGate), exactly like the plan picker, so the
+	 * card can sit on screen as long as the user needs and no agent is blocked
+	 * behind it. Anything that goes wrong - no tab, an old tab that does not know
+	 * the frame, a window that finally lapses - answers "no", which is the free
+	 * and safe outcome.
+	 */
+	askImages(projectid, info) {
+		const self = this;
+		var key = projectid || null;
+		if (!key) {
+			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
+		}
+		const known = this.getImageChoice(key);
+		if (known === true || known === false) return Promise.resolve(known);
+
+		const inflight = key ? this.imageAsks.get(key) : null;
+		if (inflight) return inflight;
+
+		var target;
+		try { target = this._targetTab(projectid || null); }
+		catch (e) { return Promise.resolve(false); }
+
+		// Sent DIRECTLY to the tab, not through the per-board draw queue: the tool
+		// call that triggered it is what the answer decides, so queueing it behind
+		// that same board's work would deadlock.
+		const ask = this._request(target.ws, {
+			t: 'media-ask',
+			toolName: (info && info.toolName) || '',
+			label: (info && info.label) || 'this component',
+			surface: (key && this.turnSurfaces.get(key)) || 'mida'
+		}, config.PLAN_PICK_TIMEOUT_MS)
+			.then(function(res) {
+				const on = !!(res && res.withImages);
+				self.log('[images] user chose ' + (on ? 'WITH' : 'without') + ' images for this turn');
+				if (key) self.imageChoices.set(key, on);
+				return on;
+			})
+			.catch(function(err) {
+				self.log('[images] ask not answered (' + (err && err.message) + ') - continuing without images');
+				if (key) self.imageChoices.set(key, false);
+				return false;
+			});
+
+		if (key) this.imageAsks.set(key, ask);
+		return ask;
+	}
+
+	/**
+	 * The user asked for images on a component the agent already rendered without
+	 * them. Nobody is waiting - that turn ended at the question - so this starts a
+	 * fresh one: the agent is handed back exactly what it sent and renders it
+	 * again with image slots. Wired to the agent manager by the daemon, like
+	 * onPlanGenerate.
+	 *
+	 * `req`: { toolName, args, guidance, label }
+	 */
+	requestImageRerender(projectid, req) {
+		var target;
+		try { target = this._targetTab(projectid || null); }
+		catch (e) {
+			this.log('[images] cannot re-render for images: ' + (e && e.message));
+			return;
+		}
+		const key = target.tab.projectid || target.tab.id;
+		// The re-render must pass the gate instead of asking again.
+		this.imageChoices.set(key, true);
+		const self = this;
+		const sendToTab = function(frame) { self._send(target.ws, frame); };
+		if (!this.onImageRerender) {
+			this.log('[images] re-render is not enabled on this bridge - the component stays without images');
+			return;
+		}
+		this.log('[images] re-rendering ' + req.toolName + ' with image slots on board ' + key);
+		this.onImageRerender(target.tab, req, sendToTab);
 	}
 
 	// ---- requests ------------------------------------------------------------

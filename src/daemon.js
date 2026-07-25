@@ -71,6 +71,9 @@ async function start(opts) {
 	// render the chosen items on a fresh headless turn (briefs are self-contained).
 	hub.onPlanGenerate = function(tab, plan, sendToTab) { agents.handlePlanGenerate(tab, plan, hub, sendToTab); };
 	hub.onPlanCancel = function(tab) { agents.cancelPlanGenerate(tab); };
+	// The user said yes to images on a component that was already rendered without
+	// them: a fresh turn renders it again with image slots (nothing waited).
+	hub.onImageRerender = function(tab, req, sendToTab) { agents.handleImageRerender(tab, req, hub, sendToTab); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly
 	// (only offer "brainstorm your files" when a workspace is actually set).

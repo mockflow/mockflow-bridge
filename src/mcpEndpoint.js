@@ -306,83 +306,176 @@ class McpEndpoint {
 			const entry = this._entry(name);
 			if (!entry) return this._err('Unknown tool: ' + name);
 
-			// Basic-plan daily generation cap is MEASURED here, never enforced: the
-			// bridge counts every draw a basic board makes - including component
-			// Create/Modify AI, which fills in place (a capture) but is still a
-			// generation - and reports the running usage to the editor, which does the
-			// prevention itself (like AI credits). Pro/trial boards are not metered.
-			const meter = this.hub.isTargetBasic(board);
+			// Image slots: this component can carry AI-generated imagery, which only
+			// MockFlow can produce (and which spends the user's credits), so the user
+			// is asked first. The question does NOT block this call - see _imageGate.
+			const gate = this._imageGate(board, entry, name, args);
+			if (gate) return this._ok(gate);
+			const withImages = !!(entry.imageSlots && this.hub.getImageChoice(board) === true);
 
-			// Debug tracing: print/dump what the agent generated for this render (see debug.js).
-			debug.toolCall(name, args);
-
-			if (entry.clientIsHtmlConversion) {
-				// render_wireframelite / render_prototypelite ship raw HTML. The CONNECTED TAB
-				// runs the conversion (HTML -> paintObjects render, or the prototype S3 upload)
-				// through the MockFlow endpoints with the user's own session, then draws the
-				// result - the bridge only relays the args (see boardHub.drawHtml).
-				const mcpType = name.replace('render_', '');
-				const hres = await this.hub.drawHtml(board, name, mcpType, args);
-				// A wireframelite/prototypelite render always draws - count it for basic plans.
-				if (meter) this._recordGen(board);
-				// Conversion report from the tab (component/chart/icon counts + warnings). It
-				// goes back to the AGENT too: a sparse or icon-less render is something the
-				// agent can fix by regenerating the HTML, but only if it is told.
-				const report = debug.toolResult(name, hres);
-				const suffix = report ? '\n\nConversion report: ' + report : '';
-				if (hres && hres.arranged) {
-					return this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
-						+ 'was arranged automatically under "' + hres.boardTitle + '". You are done: do not call '
-						+ 'layout_board or any other tool, and never output a URL or a link.' + suffix);
-				}
-				return this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
-					+ 'It is already visible on their screen - do not output or ask the user to open a link.'
-					+ FOLLOWUP_HINT + suffix);
-			}
-
-			// Shape check BEFORE anything is drawn. Agents sometimes invent argument
-			// names or stringify structured values, and until now that produced a
-			// silently malformed component: the mapping just found nothing under the
-			// documented keys and rendered whatever was left. Returning a precise
-			// error instead turns a bad render into a retry the agent can act on.
-			const shapeErr = this._checkArgs(name, args);
-			if (shapeErr) return this._err(shapeErr);
-
-			// Same pre-flight sanitization the desktop and web MCP servers run.
-			if (name === 'render_flowchart' || name === 'render_swimlane' || name === 'render_cloudarchitecture') {
-				if (typeof this.registry.sanitizeFlowData === 'function') {
-					this.registry.sanitizeFlowData(args);
-				}
-			}
-
-			const gdata = this.registry.mapToolToGdata(name, args);
-			if (!gdata) return this._err('Tool ' + name + ' has no client rendering mapping.');
-
-			// If a component Generate/Modify turn armed a capture for this board,
-			// the gdata fills the component the user is editing instead of drawing
-			// a new one (fill-in-place). Otherwise it draws normally.
-			const res = await this.hub.captureOrDraw(board, name, gdata);
-
-			// Count the draw against the basic-plan cap - whether it drew a new
-			// component or filled one in place (capture). Both are a generation.
-			if (meter) this._recordGen(board);
-
-			const type = name.replace('render_', '');
-			if (res && res.captured) {
-				return this._ok('Generated the ' + type + ' and applied it to the component the user is '
-					+ 'editing. It is already updated on their screen - you are done, do not call any more tools.');
-			}
-			if (res && res.arranged) {
-				return this._ok('Rendered the ' + type + ' - that was the last planned item, so the board was '
-					+ 'arranged automatically under "' + res.boardTitle + '". You are done: do not call '
-					+ 'layout_board or any other tool, and never output a URL or a link.');
-			}
-			return this._ok('Rendered the ' + type + ' onto the board the user has open. '
-				+ 'It is already visible on their screen - do not output or ask the user to open a link.'
-				+ FOLLOWUP_HINT);
+			return await this._draw(board, entry, name, args, withImages);
 		} catch (err) {
 			return this._err('Error running ' + name + ': ' + (err && err.message));
 		}
+	}
+
+	/**
+	 * Draw one catalog render call and describe the result for the agent.
+	 *
+	 * Called straight from the tool call, and again later when a component that
+	 * was waiting on the "generate images?" answer is finally drawn - in that case
+	 * nobody reads the returned message, the draw itself is the point.
+	 *
+	 * `withImages` says whether the user agreed to spend credits on this
+	 * component's imagery; the tab honours it and empties any slot that arrives
+	 * without agreement.
+	 */
+	async _draw(board, entry, name, args, withImages) {
+		// Basic-plan daily generation cap is MEASURED here, never enforced: the
+		// bridge counts every draw a basic board makes - including component
+		// Create/Modify AI, which fills in place (a capture) but is still a
+		// generation - and reports the running usage to the editor, which does the
+		// prevention itself (like AI credits). Pro/trial boards are not metered.
+		const meter = this.hub.isTargetBasic(board);
+
+		// Debug tracing: print/dump what the agent generated for this render (see debug.js).
+		debug.toolCall(name, args);
+
+		if (entry.clientIsHtmlConversion) {
+			// render_wireframelite / render_prototypelite ship raw HTML. The CONNECTED TAB
+			// runs the conversion (HTML -> paintObjects render, or the prototype S3 upload)
+			// through the MockFlow endpoints with the user's own session, then draws the
+			// result - the bridge only relays the args (see boardHub.drawHtml).
+			const mcpType = name.replace('render_', '');
+			const hres = await this.hub.drawHtml(board, name, mcpType, args, withImages);
+			// A wireframelite/prototypelite render always draws - count it for basic plans.
+			if (meter) this._recordGen(board);
+			// Conversion report from the tab (component/chart/icon counts + warnings). It
+			// goes back to the AGENT too: a sparse or icon-less render is something the
+			// agent can fix by regenerating the HTML, but only if it is told.
+			const report = debug.toolResult(name, hres);
+			const suffix = report ? '\n\nConversion report: ' + report : '';
+			if (hres && hres.arranged) {
+				return this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
+					+ 'was arranged automatically under "' + hres.boardTitle + '". You are done: do not call '
+					+ 'layout_board or any other tool, and never output a URL or a link.' + suffix);
+			}
+			return this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
+				+ 'It is already visible on their screen - do not output or ask the user to open a link.'
+				+ FOLLOWUP_HINT + suffix);
+		}
+
+		// Shape check BEFORE anything is drawn. Agents sometimes invent argument
+		// names or stringify structured values, and until now that produced a
+		// silently malformed component: the mapping just found nothing under the
+		// documented keys and rendered whatever was left. Returning a precise
+		// error instead turns a bad render into a retry the agent can act on.
+		const shapeErr = this._checkArgs(name, args);
+		if (shapeErr) return this._err(shapeErr);
+
+		// Same pre-flight sanitization the desktop and web MCP servers run.
+		if (name === 'render_flowchart' || name === 'render_swimlane' || name === 'render_cloudarchitecture') {
+			if (typeof this.registry.sanitizeFlowData === 'function') {
+				this.registry.sanitizeFlowData(args);
+			}
+		}
+
+		const gdata = this.registry.mapToolToGdata(name, args);
+		if (!gdata) return this._err('Tool ' + name + ' has no client rendering mapping.');
+
+		// If a component Generate/Modify turn armed a capture for this board,
+		// the gdata fills the component the user is editing instead of drawing
+		// a new one (fill-in-place). Otherwise it draws normally.
+		const res = await this.hub.captureOrDraw(board, name, gdata, entry.imageSlotForm || null, withImages);
+
+		// Count the draw against the basic-plan cap - whether it drew a new
+		// component or filled one in place (capture). Both are a generation.
+		if (meter) this._recordGen(board);
+
+		const type = name.replace('render_', '');
+		if (res && res.captured) {
+			return this._ok('Generated the ' + type + ' and applied it to the component the user is '
+				+ 'editing. It is already updated on their screen - you are done, do not call any more tools.');
+		}
+		if (res && res.arranged) {
+			return this._ok('Rendered the ' + type + ' - that was the last planned item, so the board was '
+				+ 'arranged automatically under "' + res.boardTitle + '". You are done: do not call '
+				+ 'layout_board or any other tool, and never output a URL or a link.');
+		}
+		return this._ok('Rendered the ' + type + ' onto the board the user has open. '
+			+ 'It is already visible on their screen - do not output or ask the user to open a link.'
+			+ FOLLOWUP_HINT);
+	}
+
+	/**
+	 * The "generate images?" gate for one render call.
+	 *
+	 * A local agent is a text model: it writes the component but cannot draw the
+	 * pictures in it. MockFlow can, in the user's own tab, against their AI
+	 * credits - so the user decides, and only they can. Nobody can ask earlier
+	 * than this: the agent chose the component type inside its own process, and
+	 * this call is the first moment anyone knows an image-capable component is
+	 * being made.
+	 *
+	 * The call does NOT wait for the answer. Like plan_board, it hands the
+	 * question to the tab and ENDS the agent's turn; the work resumes on its own
+	 * when the user answers (_afterImageAnswer). Blocking here would put an open
+	 * question in front of a user on one side and a stalled agent on the other,
+	 * with every agent CLI's own call ceiling deciding who gave up first.
+	 *
+	 * Entirely catalog-driven (imageSlots / imageSlotGuidance), so a component
+	 * gains the whole flow by declaring it - no tool names live here.
+	 *
+	 * @returns {string|null} the message to end this turn with, or null when the
+	 *          call may proceed and draw right now.
+	 */
+	_imageGate(board, entry, name, args) {
+		if (!entry || !entry.imageSlots) return null;
+		const before = this.hub.getImageChoice(board);
+		// Already answered for this turn: draw. When the answer was yes, the agent
+		// was told how to fill the slots (its system prompt at turn start, or the
+		// re-render turn below) and this call is its response to that.
+		if (before === true || before === false) return null;
+
+		const label = entry.planUILabel || String(name).replace(/^render_/, '').replace(/_/g, ' ');
+		const self = this;
+		// The component the agent authored is kept as-is. If the user says no it is
+		// drawn exactly like this - the agent never has to produce it twice.
+		const pending = { toolName: name, args: args, entry: entry, label: label };
+		this.hub.askImages(board, { toolName: name, label: label })
+			.then(function(on) { return self._afterImageAnswer(board, pending, on); })
+			.catch(function(err) { self.log('[images] resume failed: ' + (err && err.message)); });
+
+		return 'The user is choosing whether this ' + label + ' should include AI-generated images '
+			+ '(only MockFlow can generate pictures, and they use the user\'s AI credits). YOUR TURN IS '
+			+ 'COMPLETE: do not render anything and do not call any more tools - the ' + label + ' is drawn '
+			+ 'automatically as soon as they answer. Briefly tell the user to answer the question on their '
+			+ 'board, and never output a URL or a link.';
+	}
+
+	/**
+	 * The user answered the image question; the turn that asked it is long over.
+	 *
+	 *  - no  -> draw what the agent already produced. It was authored without image
+	 *           slots (the default it is told to use), so it is already correct and
+	 *           no agent needs to run again.
+	 *  - yes -> that component has no imagery in it, and only the agent can say
+	 *           where the pictures belong. Start a fresh turn that hands it back
+	 *           exactly what it sent, plus this tool's slot instructions.
+	 */
+	_afterImageAnswer(board, pending, on) {
+		if (on) {
+			this.hub.requestImageRerender(board, {
+				toolName: pending.toolName,
+				args: pending.args,
+				label: pending.label,
+				guidance: pending.entry.imageSlotGuidance || ''
+			});
+			return;
+		}
+		this.log('[images] drawing the ' + pending.label + ' the agent already produced, without images');
+		return this._draw(board, pending.entry, pending.toolName, pending.args, false)
+			.catch(function() {});
 	}
 
 	/**

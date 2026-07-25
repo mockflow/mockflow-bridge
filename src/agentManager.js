@@ -122,6 +122,7 @@ class AgentManager {
 		this.attachDirs = new Map();  // key -> folder holding this session's attachments
 		this.compgenProcs = new Map(); // key -> child process (component-AI turns)
 		this.planProcs = new Map();    // key -> child process (plan_board continuation turns)
+		this.imageProcs = new Map();   // key -> child process (image re-render turns)
 		this.available = null;        // cached detection for the selected agent
 	}
 
@@ -502,6 +503,44 @@ class AgentManager {
 	}
 
 	/**
+	 * Open a turn's image state on the hub and return the sentence the agent needs
+	 * about it.
+	 *
+	 * A local agent cannot generate imagery; MockFlow can, in the user's tab, on
+	 * their AI credits. `withImages` is what the tab already knows of the user's
+	 * choice - a component's own "with images" setting, or a choice they stated in
+	 * chat. When it says nothing, the agent renders without imagery (the safe,
+	 * free default) and the mcpEndpoint gate asks the user the moment an
+	 * image-capable component is actually reached, then has the agent render it
+	 * again with slots. Either way no tool names appear here: the catalog decides
+	 * which components have image slots.
+	 */
+	_openImageTurn(hub, tab, frame, askable) {
+		var choice = (frame && (frame.withImages === true || frame.withImages === false))
+			? frame.withImages : undefined;
+		// A turn that CANNOT be interrupted (component AI: the edited component is
+		// waiting on this one turn to fill it) never leaves the answer open - an
+		// unstated choice means no imagery, not a question. Those surfaces all have
+		// somewhere to state it: the component's own "with images" setting, or the
+		// prompt box's checkbox.
+		if (choice === undefined && askable === false) choice = false;
+		hub.setImageChoice(tab.projectid, choice, (frame && frame.surface) || 'mida');
+		if (choice === true) {
+			return ' The user asked for AI-generated images in what you draw: where a render tool documents '
+				+ 'image slots, fill them with a "mfimg::" prompt token describing the picture (no text, '
+				+ 'letters or numbers in it). The images are generated in the user\'s browser after your '
+				+ 'call - never output a URL or wait for one.';
+		}
+		if (choice === false) {
+			return ' Generate NO imagery in what you draw: leave every image slot out and carry the design '
+				+ 'with colour, type and shapes instead.';
+		}
+		return ' Render without image slots. If a render tool answers that the user is being asked about '
+			+ 'images, your turn is over and the component is drawn for you once they answer: say so briefly '
+			+ 'and stop, do not call anything else.';
+	}
+
+	/**
 	 * Run one chat turn for a tab. `sendToTab(frame)` delivers frames back.
 	 * `hub` is used to pin render targeting to the chatting board for the
 	 * duration of the turn.
@@ -554,7 +593,7 @@ class AgentManager {
 		// path in the prompt) - so skip this "no file access" line when there is an
 		// attachment, or the agent (notably Codex, which does not take extraDirs)
 		// parrots "restart with --workspace" and refuses to read the file it was handed.
-		var systemPrompt = PERSONA + RESEARCH_GUIDANCE;
+		var systemPrompt = PERSONA + RESEARCH_GUIDANCE + this._openImageTurn(hub, tab, frame);
 		if (!this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
@@ -724,6 +763,10 @@ class AgentManager {
 			session.busy = false;
 			session.proc = null;
 			hub.selectedProjectId = prevSelected;
+			// The image answer belonged to THIS turn. Clearing it means the next
+			// turn - including one from an agent outside the editor - asks again
+			// rather than inheriting permission to spend credits.
+			hub.setImageChoice(tab.projectid, undefined);
 			// Close any dangling step rows so the timeline never spins forever.
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
@@ -883,6 +926,12 @@ class AgentManager {
 		// wants so the first attempt is usually right.
 		systemPrompt += ' A call that comes back with an error drew nothing and does not count as your one '
 			+ 'call: read the error, fix the arguments it names, and call the tool again (up to three tries).';
+
+		// Whether this component may carry AI-generated imagery. QuickSettings and
+		// the prompt box state it before the turn (a component's own "with images"
+		// setting), and this turn is filling a component that is waiting on it - so
+		// it is never paused to ask; unstated means no imagery.
+		systemPrompt += this._openImageTurn(hub, tab, frame, false);
 		const argHint = this._toolArgHint(tools);
 		if (argHint) systemPrompt += ' ' + argHint;
 
@@ -1005,6 +1054,8 @@ class AgentManager {
 			hub.clearCapture(tab.projectid);
 			if (tab.projectid) hub.convertContext.delete(tab.projectid);
 			hub.selectedProjectId = prevSelected;
+			// This turn's image answer dies with the turn (see the chat path).
+			hub.setImageChoice(tab.projectid, undefined);
 			for (var k in openSteps) {
 				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
 			}
@@ -1027,6 +1078,103 @@ class AgentManager {
 			} else {
 				finish(true, null, false);
 			}
+		});
+	}
+
+	/**
+	 * Re-render one component WITH image slots, after the user answered the
+	 * "generate images?" question.
+	 *
+	 * The turn that drew it ended at the question (nothing waits on a user), so
+	 * this is a fresh one - and it needs no conversation memory, because the agent
+	 * is handed back the exact call it made. It renders the same component again
+	 * with the slots filled in, and the tab generates the pictures into them.
+	 *
+	 * Fired by boardHub.requestImageRerender, which has already recorded the
+	 * user's yes, so this render passes the image gate instead of asking again.
+	 * Drives the same Mida loader the plan continuation drives.
+	 */
+	handleImageRerender(tab, req, hub, sendToTab) {
+		const self = this;
+		const key = tab.projectid || tab.id;
+		const tool = req && req.toolName;
+		const label = (req && req.label) || 'component';
+		const send = sendToTab || function() {};
+		if (!tool) return;
+
+		const fail = function(reason) {
+			self.log('[images] re-render skipped: ' + reason);
+			send({ t: 'plan-done', ok: false, error: reason });
+		};
+		if (!this.detect()) return fail(this.agent.label + ' is not installed, so the images could not be added.');
+		if (this.imageProcs.has(key)) return fail('That board is already adding images.');
+
+		var argsJson = '';
+		try { argsJson = JSON.stringify(req.args || {}); } catch (e) { argsJson = ''; }
+		if (!argsJson) return fail('The component data could not be read back.');
+
+		const prevSelected = hub.selectedProjectId;
+		if (tab.projectid) hub.selectedProjectId = tab.projectid;
+
+		const prompt = 'You rendered this ' + label + ' on the user\'s MockFlow board without imagery, and '
+			+ 'they have now asked for AI-generated images in it. Call ' + tool + ' ONCE more with exactly '
+			+ 'the same content, adding image slots.\n\n'
+			+ 'This is the call you made, verbatim:\n' + argsJson;
+
+		const systemPrompt = 'You add imagery to a component you already rendered. Call ' + tool + ' exactly '
+			+ 'once, with the SAME content you are given plus its image slots - change nothing else. '
+			+ (req.guidance || '')
+			+ ' Each slot is a prompt token: put "mfimg::" followed by a plain description of the picture '
+			+ '(no text, letters or numbers in it) where the image asset belongs. The pictures are generated '
+			+ 'in the user\'s browser after your call, so never output a URL, never wait for one, do not chat '
+			+ 'and do not output any text. A call that comes back with an error drew nothing: read the error, '
+			+ 'fix what it names, and call the tool again (up to three tries).';
+
+		const ws = this._effectiveWorkspace(tab);
+		const delivery = this._deliverPrompt(prompt, key);
+		const spec = this.agent.buildArgs(this._applyDelivery({
+			cwd: ws,
+			projectid: tab.projectid,
+			prompt: delivery.prompt,
+			systemPrompt: systemPrompt,
+			allowedTools: 'mcp__mockflow__' + tool,
+			mockflowTools: this._mockflowToolNames(),
+			partialMessages: false
+		}, delivery));
+
+		this.log('[images] re-rendering ' + tool + ' with image slots for "' + (tab.title || key) + '"');
+		send({ t: 'plan-start', total: 1, label: 'Adding images…', items: [{ name: label, tool: tool }] });
+
+		var proc;
+		try {
+			proc = this._spawnWithPrompt(spec, delivery, {
+				env: Object.assign({}, process.env, spec.env || {}),
+				cwd: ws
+			});
+		} catch (err) {
+			hub.selectedProjectId = prevSelected;
+			return fail('Could not launch the local agent: ' + err.message);
+		}
+		this.imageProcs.set(key, proc);
+
+		var stderrTail = '';
+		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
+		// The agent's own output is not needed here: the draw happens through the
+		// MCP loopback, and the tab reports its own progress while it generates.
+		proc.stdout.on('data', function() {});
+
+		const done = function(ok, error) {
+			self.imageProcs.delete(key);
+			hub.selectedProjectId = prevSelected;
+			// This answer belonged to this piece of work, like every other turn.
+			hub.setImageChoice(tab.projectid, undefined);
+			send({ t: 'plan-done', ok: ok, error: error || null, doneText: ok ? 'Images added.' : null });
+		};
+		proc.on('error', function(err) { done(false, 'Local agent error: ' + (err && err.message)); });
+		proc.on('close', function(code) {
+			if (code === 0) return done(true, null);
+			done(false, 'The local agent stopped before adding the images'
+				+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
 		});
 	}
 
@@ -1083,6 +1231,11 @@ class AgentManager {
 			+ 'ONE shared design system and pass the SAME viewportWidth on every screen. The board arranges '
 			+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
 			+ 'the plan, do not chat, and never output a URL or a link.';
+
+		// A confirmed plan is its own turn, so it starts with no image answer
+		// carried over: the first image-capable item in the batch asks the user
+		// once, and every later item reuses that answer.
+		systemPrompt += this._openImageTurn(hub, tab, { surface: 'mida' });
 
 		// Same gate as the component path: when the plan contains a real-world /
 		// current-data component (catalog `webResearch`), let the agent ground the
@@ -1212,6 +1365,8 @@ class AgentManager {
 			// Leftover plan count means the agent died mid-batch - drop it so the
 			// stale plan never re-arranges a later, unrelated batch.
 			hub.clearPlan(tab.projectid);
+			// This batch's image answer dies with it (see the chat path).
+			hub.setImageChoice(tab.projectid, undefined);
 			// Close any dangling rows so the tab's timeline never spins forever.
 			for (var k in openSteps) {
 				send({ t: 'plan-step', step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
