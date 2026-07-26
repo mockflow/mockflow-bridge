@@ -73,20 +73,42 @@ async function fetchRemote() {
  * @returns {Promise<{registry: any[], source: string}>}
  */
 async function load() {
-	try {
-		const registry = await fetchRemote();
-		log('Catalog: loaded');
-		warnIfEngineOld(registry);
-		return { registry: registry, source: 'remote' };
-	} catch (err) {
-		log('Catalog: remote fetch unavailable (' + (err && err.message) + '), trying cache');
+	// A local catalog is normally started in the same breath as the bridge (one dev
+	// script bringing up MockFlow and the daemon together), so the first fetch can
+	// easily beat the server to the port. Falling straight back to the cache then
+	// silently runs the WHOLE session on yesterday's tools - a new tool looks like it
+	// "isn't in the catalog" and the reason is nowhere near the symptom. So wait the
+	// server out briefly before giving up. A remote catalog gets one attempt: it is
+	// either reachable or it is not, and startup should not hang on it.
+	const attempts = config.LOCAL_CATALOG ? 6 : 1;
+	for (var i = 0; i < attempts; i++) {
+		try {
+			const registry = await fetchRemote();
+			log('Catalog: loaded' + (i > 0 ? ' (after waiting ' + (i * 5) + 's for ' + config.CATALOG_URL + ')' : ''));
+			warnIfEngineOld(registry);
+			return { registry: registry, source: 'remote' };
+		} catch (err) {
+			const last = (i === attempts - 1);
+			log('Catalog: remote fetch unavailable (' + (err && err.message) + ')'
+				+ (last ? ', trying cache' : ' - retrying in 5s'));
+			if (!last) await new Promise(function(r) { setTimeout(r, 5000); });
+		}
 	}
 
 	try {
 		if (fs.existsSync(config.CATALOG_CACHE_FILE)) {
 			const registry = requireFresh(config.CATALOG_CACHE_FILE);
 			if (validateRegistry(registry)) {
-				log('Catalog: loaded from cache');
+				// Say how old it is. Running on a stale catalog is the difference between
+				// "this tool does not exist" and "this bridge has not seen it yet".
+				var age = '';
+				try {
+					var mtime = fs.statSync(config.CATALOG_CACHE_FILE).mtime;
+					age = ' (cached ' + mtime.toISOString().replace('T', ' ').replace(/\..+/, '')
+						+ ' - tools added since then are NOT available; restart the bridge once '
+						+ config.CATALOG_URL + ' is up)';
+				} catch (e) {}
+				log('Catalog: loaded from cache' + age);
 				warnIfEngineOld(registry);
 				return { registry: registry, source: 'cache' };
 			}

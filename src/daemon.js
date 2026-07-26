@@ -67,6 +67,9 @@ async function start(opts) {
 		agents.handleCompGen(tab, frame, sendToTab, hub);
 	};
 	hub.onCompGenCancel = function(tab) { agents.cancelCompGen(tab); };
+	// Whether a component turn is still running for a board - asked when a tab
+	// reconnects saying it is still waiting on one.
+	hub.isCompGenRunning = function(tab) { return agents.compgenProcs.has(tab.projectid || tab.id); };
 	// plan_board continuation: the user clicked Generate Board in their tab -
 	// render the chosen items on a fresh headless turn (briefs are self-contained).
 	hub.onPlanGenerate = function(tab, plan, sendToTab) { agents.handlePlanGenerate(tab, plan, hub, sendToTab); };

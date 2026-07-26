@@ -98,6 +98,9 @@ module.exports = {
 	// if the endpoint is unreachable and there is no cache yet, startup fails.
 	CATALOG_URL: CATALOG_URL,
 	CATALOG_FETCH_TIMEOUT_MS: 6000,
+	// A catalog served from this machine is usually starting up alongside the bridge,
+	// so the loader waits it out instead of falling back to a stale cache (catalog.js).
+	LOCAL_CATALOG: LOCAL_CATALOG,
 
 	TOOL_TIMEOUT_MS: 60000,
 	// HTML-conversion tools (render_wireframelite / render_prototypelite): the tab

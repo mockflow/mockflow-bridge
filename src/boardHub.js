@@ -9,7 +9,9 @@
  * Wire protocol (JSON frames):
  *   tab -> bridge:  {t:'hello', token?}         first frame after connect
  *                   {t:'pair', code}            answer to pair-required
- *                   {t:'register', projectid, title, focused, visible, url}
+ *                   {t:'register', projectid, title, focused, visible, url, compturn?}
+ *                        compturn: reconnecting mid-turn, still waiting on this
+ *                        component-AI turn
  *                   {t:'state', focused, visible, projectid, title}
  *                   {t:'result', id, ok, data?, error?}
  *                   {t:'plan-cancel'}           stop the running plan generation
@@ -18,7 +20,9 @@
  *                   {t:'ready'}                 authenticated, please register
  *                   {t:'registered'}
  *                   {t:'tool', id, toolName, gdata}
- *                   {t:'toolhtml', id, toolName, mcpType, args, fromconvert?}
+ *                   {t:'toolhtml', id, toolName, mcpType, args, fromconvert?, fillTurnId?}
+ *                        fillTurnId: fill the component of that component-AI turn
+ *                        in place instead of drawing a new one
  *                   {t:'read', id, what}
  *                   {t:'layout', id, boardTitle}
  *                   {t:'snapshot', id}              reset the layout batch boundary
@@ -87,9 +91,17 @@ class BoardHub {
 		});
 
 		// Heartbeat: drop tabs that stopped answering pings (closed laptop etc.)
+		//
+		// TWO missed pings, not one. A browser answers pings by itself, but a tab that
+		// the browser has frozen (backgrounded - which is exactly where a user leaves a
+		// board while waiting out a minutes-long generation) can miss one round. On a
+		// single strike that terminated a perfectly good board mid-turn, and the editor
+		// treated the drop as the end of the local run.
 		this.heartbeat = setInterval(function() {
 			self.wss.clients.forEach(function(ws) {
-				if (ws.isAlive === false) return ws.terminate();
+				ws.missedPings = (ws.missedPings || 0) + (ws.isAlive === false ? 1 : 0);
+				if (ws.isAlive === false && ws.missedPings >= 2) return ws.terminate();
+				if (ws.isAlive !== false) ws.missedPings = 0;
 				ws.isAlive = false;
 				try { ws.ping(); } catch (e) {}
 			});
@@ -117,6 +129,11 @@ class BoardHub {
 		const tab = {
 			id: 'tab_' + (this.nextId++),
 			origin: req.headers.origin || null,
+			// This tab's own socket. Board targeting resolves by projectid, which picks
+			// the FIRST tab showing a board - so with the same board open in two tabs, a
+			// turn started in one could be answered into the other. Anything belonging to
+			// a specific turn is delivered here while it is open.
+			ws: ws,
 			paired: false,
 			registered: false,
 			projectid: null,
@@ -146,7 +163,58 @@ class BoardHub {
 			// Files the user attached during this board's session were saved on
 			// their machine for follow-up questions; the session is over now.
 			if (self.onTabGone) self.onTabGone(tab);
+			self._reapCompGenIfGone(tab);
 		});
+	}
+
+	/**
+	 * A board tab went away while a component-AI turn may still be running for it.
+	 *
+	 * The turn is NOT cancelled straight away: the editor keeps a component turn alive
+	 * across a dropped socket precisely so a blip (a frozen background tab that missed
+	 * a heartbeat, a brief network stall) does not throw away a minutes-long local
+	 * generation - the result lands on the reconnected socket and still fills the
+	 * component. So wait out the editor's reconnect backoff first, and only if no tab
+	 * for that board has come back is the turn really orphaned: kill the agent and drop
+	 * its capture, instead of generating for a board nobody is listening to.
+	 */
+	/**
+	 * Deliver a frame that belongs to one turn.
+	 *
+	 * The turn's OWN socket wins while it is open: board targeting resolves by
+	 * projectid and returns the first tab showing that board, so with the same board
+	 * open twice a turn started in one tab would otherwise be answered into the other -
+	 * which has no such turn waiting, and rejects it.
+	 *
+	 * Only once that socket has gone does the board's current socket take over, so a
+	 * turn still survives a reconnect (the editor keeps waiting on it across one).
+	 */
+	_sendToBoard(projectid, turnWs, frame) {
+		if (turnWs && turnWs.readyState === 1) return this._send(turnWs, frame);
+		if (projectid) {
+			for (const [sock, t] of this.tabs.entries()) {
+				if (t.registered && t.projectid === projectid) return this._send(sock, frame);
+			}
+		}
+		return this._send(turnWs, frame);
+	}
+
+	_reapCompGenIfGone(tab) {
+		const key = tab.projectid || null;
+		if (!key || !tab.registered) return;
+		const self = this;
+		// Longer than the editor's maximum reconnect delay (30s), so a tab that is
+		// coming back is never reaped a moment before it arrives.
+		setTimeout(function() {
+			for (const t of self.tabs.values()) {
+				if (t.registered && t.projectid === key) return;  // it came back
+			}
+			const hadTurn = self.hasCapture(key);
+			self.clearCapture(key);
+			if (self.onCompGenCancel) self.onCompGenCancel(tab);
+			if (hadTurn)
+				self.log('Board "' + (tab.title || key) + '" did not come back - dropped its component AI turn.');
+		}, 45000);
 	}
 
 	_onFrame(ws, tab, msg) {
@@ -197,6 +265,19 @@ class BoardHub {
 				tab.visible = msg.visible !== false;
 				tab.url = msg.url || null;
 				this._send(ws, { t: 'registered', agentInfo: this._agentInfoFor(tab) });
+				// A tab that reconnects mid-turn says which component-AI turn it is still
+				// waiting on (msg.compturn). Usually the turn is alive and its result lands
+				// on this new socket - but if the reconnect took longer than the reap
+				// window, the agent is already gone and nothing would ever answer: tell the
+				// tab now so it falls back to MockFlow AI, instead of holding its loader
+				// until its own timeout.
+				if (msg.compturn && !(this.isCompGenRunning && this.isCompGenRunning(tab))) {
+					this.log('Board "' + (tab.title || tab.projectid) + '" reconnected waiting on a component AI '
+						+ 'turn that is no longer running - telling it to fall back.');
+					this.clearCapture(tab.projectid);
+					this._send(ws, { t: 'compgen-done', id: msg.compturn, ok: false, fallback: true,
+						error: 'The connection to the local agent dropped for too long and its turn was lost.' });
+				}
 				this.log('Board connected: "' + (tab.title || tab.projectid) + '"'
 					+ (tab.focused ? ' (focused)' : '') + (tab.isBasic ? ' [basic plan]' : ''));
 				return;
@@ -215,7 +296,13 @@ class BoardHub {
 				this.pending.delete(msg.id);
 				clearTimeout(p.timer);
 				if (msg.ok) p.resolve(msg.data);
-				else p.reject(new Error(msg.error || 'Tab reported failure'));
+				else {
+					// The tab's reason a draw failed used to go ONLY to the agent, so
+					// diagnosing "it failed in the local agent" meant reading the agent's
+					// own transcript. It is the single most useful line there is here.
+					this.log('Tab reported a failed draw: ' + (msg.error || 'no reason given'));
+					p.reject(new Error(msg.error || 'Tab reported failure'));
+				}
 				return;
 			}
 
@@ -242,7 +329,13 @@ class BoardHub {
 				if (!tab.registered) return;
 				const self = this;
 				if (this.onCompGen) {
-					this.onCompGen(tab, msg, function(frame) { self._send(ws, frame); }, this);
+					// Addressed to the BOARD, not to this socket. A component turn outlives a
+					// dropped socket (the editor keeps waiting on it across a reconnect), and
+					// its steps and its final compgen-done have to reach whichever socket the
+					// board is on NOW - sending them to the socket that opened the turn would
+					// drop them into a closed connection and leave the component's loader
+					// spinning until its own timeout, even though the fill itself landed.
+					this.onCompGen(tab, msg, function(frame) { self._sendToBoard(tab.projectid, ws, frame); }, this);
 				} else {
 					this._send(ws, { t: 'compgen-done', id: msg.id, ok: false, fallback: true, error: 'Component AI is not enabled on this bridge.' });
 				}
@@ -414,9 +507,19 @@ class BoardHub {
 	 * gdata is sent straight back to the tab as a {t:'compgen-data'} frame so the
 	 * component the user is editing fills in place. Used by the agent manager
 	 * for a component Generate/Modify turn.
+	 *
+	 * opts.html marks a fill whose tool is an HTML-conversion tool: that draw goes
+	 * through drawHtml (the tab converts the HTML itself), so the flag is what tells
+	 * drawHtml this render belongs to the armed turn.
 	 */
-	setCapture(projectid, turnId, send) {
-		if (projectid) this.captures.set(projectid, { turnId: turnId, send: send });
+	setCapture(projectid, turnId, send, opts) {
+		if (projectid) this.captures.set(projectid, {
+			turnId: turnId, send: send, html: !!(opts && opts.html),
+			// The tab this turn belongs to. Its result goes back HERE, not merely to
+			// "a tab showing this board" - with the board open twice those differ, and
+			// the other tab has no turn waiting for it.
+			ws: (opts && opts.ws) || null
+		});
 	}
 
 	clearCapture(projectid) {
@@ -628,33 +731,59 @@ class BoardHub {
 	/**
 	 * HTML-conversion tools (render_wireframelite / render_prototypelite): the raw
 	 * tool args go to the tab, which runs the HTML conversion through the MockFlow
-	 * endpoints with the user's own session and draws the result itself. An armed
-	 * component-AI capture is deliberately NOT consumed here: fill-in-place compgen
-	 * modes never allow these tools (agentManager skips clientIsHtmlConversion
-	 * types), and draw-new modes (create-similar) arm no capture - so an html draw
-	 * while a capture is armed can only be an unrelated Mode A agent, and drawing
-	 * normally is correct and leaves the armed turn intact.
+	 * endpoints with the user's own session and draws the result itself.
+	 *
+	 * An armed component-AI capture is honoured ONLY when it says this turn fills
+	 * from HTML (`html`, set from the catalog's clientHtmlFillsInPlace). Then the
+	 * turn id travels with the frame and the tab hands the converted result to the
+	 * component the user is editing instead of drawing a new one. Any other armed
+	 * capture is left alone: its tool is a JSON one that comes through captureOrDraw,
+	 * so an html draw during it can only be an unrelated Mode A agent, and drawing
+	 * normally is correct.
+	 *
+	 * The capture is consumed only once the tab confirms the fill (res.filled), so a
+	 * conversion that fails leaves the turn armed - the agent's retry still fills in
+	 * place instead of dropping a second component on the board, and a turn that
+	 * never produces anything still falls back to MockFlow AI (agentManager.finish).
 	 */
 	drawHtml(projectid, toolName, mcpType, args, imagesAllowed) {
 		var key = projectid;
 		if (!key) {
 			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
 		}
-		// Same plan-selection gate as captureOrDraw: never draw past the picker.
-		if (this.hasPendingPick(key)) {
+		const cap = key ? this.captures.get(key) : null;
+		const fill = !!(cap && cap.html);
+		// Same plan-selection gate as captureOrDraw: never draw past the picker. A
+		// fill-in-place turn edits a component that is already on the board, so it is
+		// not a draw the picker is holding back.
+		if (!fill && this.hasPendingPick(key)) {
 			return Promise.reject(new Error(
 				'The user has not confirmed the board plan yet - the selection is on their screen. '
 				+ 'STOP: do not render anything. Generation starts automatically when the user clicks '
 				+ 'Generate Board; your part ended when you proposed the plan.'));
 		}
 		const frame = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {}, imagesAllowed: !!imagesAllowed };
+		if (fill) frame.fillTurnId = cap.turnId;
+		else if (cap) {
+			// A capture is armed but this tool is not one that fills from HTML, so this
+			// draw belongs to something else. Worth saying: an html draw landing during a
+			// component turn is how a stray second component appears on the board.
+			this.log('Note: ' + toolName + ' drew while a component AI turn was armed on this board.');
+		}
 		// Convert AI: tag the drawn component with its source so the client connects
 		// and positions it relative to the source (parity with captureOrDraw).
 		const conv = key ? this.convertContext.get(key) : null;
 		if (conv) frame.fromconvert = conv;
 		const self = this;
-		return this.runOnBoard(projectid, frame, config.HTML_TOOL_TIMEOUT_MS)
+		// A fill goes to the tab whose turn it is; a plain draw goes to the board.
+		return this.runOnBoard(projectid, frame, config.HTML_TOOL_TIMEOUT_MS, fill ? cap.ws : null)
 			.then(function(res) {
+				// Filled in place: nothing new landed on the board, so this is not a
+				// planned draw and must not advance a plan batch.
+				if (res && res.filled) {
+					self.clearCapture(key);
+					return res;
+				}
 				return self._notePlannedDraw(key).then(function(arranged) {
 					// Keep the tab's conversion diagnostics on the result either way - the
 					// arranged branch replaces the payload and would otherwise drop them.
@@ -871,10 +1000,17 @@ class BoardHub {
 	 * Send one frame to the targeted board tab and await its {t:'result'} reply.
 	 * Calls against the SAME board are serialized through a per-board promise
 	 * queue so parallel agents cannot interleave placements mid-draw.
+	 *
+	 * turnWs pins the frame to one specific tab (the one whose turn this is) while
+	 * that socket is open - see _sendToBoard. Everything else resolves by board and
+	 * lands on whichever tab is showing it, which is right for a plain draw and wrong
+	 * for the answer to a turn.
 	 */
-	runOnBoard(projectid, frame, timeoutMs) {
+	runOnBoard(projectid, frame, timeoutMs, turnWs) {
 		const self = this;
-		const target = this._targetTab(projectid || null);
+		const target = (turnWs && turnWs.readyState === 1)
+			? { ws: turnWs, tab: this.tabs.get(turnWs) || { projectid: projectid } }
+			: this._targetTab(projectid || null);
 		const key = target.tab.projectid || target.tab.id;
 
 		const tail = this.queues.get(key) || Promise.resolve();

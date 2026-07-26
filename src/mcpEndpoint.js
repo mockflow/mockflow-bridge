@@ -294,7 +294,10 @@ class McpEndpoint {
 		const modify = (typeof this.hub.getTurnMode === 'function')
 			&& this.hub.getTurnMode(board) === 'modify';
 		const self = this;
-		return this.registry.getToolDefinitions().map(function(def) {
+		// { bridge: true }: the catalog keeps back tools that only a connected editor tab
+		// can carry out (an in-place edit of a component the user has open). This IS that
+		// tab's agent, so they belong in its list; an older catalog simply ignores the flag.
+		return this.registry.getToolDefinitions({ bridge: true }).map(function(def) {
 			const entry = self._entry(def.name);
 			if (!entry || !entry.imageSlots) return def;
 			// A component's two branches are COMPOSITION rules - they describe how to
@@ -548,6 +551,14 @@ class McpEndpoint {
 			// agent can fix by regenerating the HTML, but only if it is told.
 			const report = debug.toolResult(name, hres);
 			const suffix = report ? '\n\nConversion report: ' + report : '';
+			// Filled the component the user is editing (a Generate/Modify turn on a
+			// component whose local tool is this HTML one) - say so, or the agent reads
+			// "rendered onto the board" as a new component and may draw again.
+			if (hres && hres.filled) {
+				return this._ok('Filled the ' + mcpType + ' component the user is editing with this design. '
+					+ 'It has replaced that component\'s content on their screen. You are done: do not call '
+					+ 'this or any other render tool again, and never output a URL or a link.' + suffix);
+			}
 			if (hres && hres.arranged) {
 				return this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
 					+ 'was arranged automatically under "' + hres.boardTitle + '". You are done: do not call '

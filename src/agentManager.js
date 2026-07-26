@@ -144,25 +144,47 @@ class AgentManager {
 	 *                       any of the 8 chart components via its componentType arg)
 	 * Returns [] when nothing local can produce this component.
 	 */
-	_toolsForComptype(comptype, includeHtml) {
+	_toolsForComptype(comptype, includeHtml, mode) {
 		if (!comptype || !this.registry) return [];
 		var out = [];
 		for (var i = 0; i < this.registry.length; i++) {
 			var e = this.registry[i];
 			if (!e.mcpToolName) continue;
-			// HTML-conversion tools (render_wireframelite / render_prototypelite) always
-			// DRAW on the board (boardHub.drawHtml bypasses the capture), so they can
-			// never fill a component in place. For fill modes, returning them would arm
-			// a capture that is never consumed and end in a double generation (local
-			// draw + server fallback). Draw-new modes (includeHtml, e.g. create-similar)
-			// want exactly that draw, so they opt in.
-			if (e.clientIsHtmlConversion && !includeHtml) continue;
+			// An entry can restrict itself to certain turn modes (`fillModes`), for a tool
+			// that only makes sense against something already on the board - editing the
+			// element a user picked in a running prototype is a modify and nothing else,
+			// while creating that prototype is a whole-document job for MockFlow AI.
+			if (Array.isArray(e.fillModes) && (!mode || e.fillModes.indexOf(mode) === -1)) continue;
+			// HTML-conversion tools (render_wireframelite / render_prototypelite) normally
+			// DRAW on the board, so returning them for a fill mode would arm a capture
+			// that is never consumed and end in a double generation (local draw + server
+			// fallback). Draw-new modes (includeHtml, e.g. create-similar) want exactly
+			// that draw, so they opt in.
+			// `clientHtmlFillsInPlace` is the exception: the component behind that tool
+			// can adopt the converted HTML as its own content (its sendGenText takes the
+			// paintObjects), so the tab routes the conversion into the edited component
+			// instead of drawing a new one (boardHub.drawHtml honours the capture for
+			// these). Without it, a component whose ONLY local tool is an HTML tool has
+			// no local Generate/Modify at all and every turn falls back to MockFlow AI.
+			if (e.clientIsHtmlConversion && !includeHtml && !e.clientHtmlFillsInPlace) continue;
 			var match = e.clientComp === comptype
 				|| e.fillsComptype === comptype
 				|| (Array.isArray(e.fillsComptypes) && e.fillsComptypes.indexOf(comptype) !== -1);
 			if (match) out.push(e.mcpToolName);
 		}
 		return out;
+	}
+
+	/** True if any of these tools fills its component from converted HTML
+	 *  (catalog `clientHtmlFillsInPlace` flag). Such a fill turn goes through
+	 *  boardHub.drawHtml, not captureOrDraw, so the capture has to say so. */
+	_toolFillsFromHtml(toolNames) {
+		if (!this.registry || !toolNames || !toolNames.length) return false;
+		for (var i = 0; i < this.registry.length; i++) {
+			var e = this.registry[i];
+			if (e.clientHtmlFillsInPlace && toolNames.indexOf(e.mcpToolName) !== -1) return true;
+		}
+		return false;
 	}
 
 	/** True if any of these tools is a real-world/current-data component
@@ -550,10 +572,14 @@ class AgentManager {
 		const turnMode = (frame && frame.mode === 'modifyai') ? 'modify' : 'create';
 		hub.setImageChoice(tab.projectid, choice, (frame && frame.surface) || 'mida', turnMode);
 		if (choice === true) {
+			// The slot form belongs to the TOOL, not to this sentence: component data
+			// takes a token, a document takes the attribute its own markup documents.
+			// Naming one form here made the agent write it into every tool, so an HTML
+			// render came back with the token sitting in src= and no pictures at all.
 			return ' The user asked for AI-generated images in what you draw: where a render tool documents '
-				+ 'image slots, fill them with a "mfimg::" prompt token describing the picture (no text, '
-				+ 'letters or numbers in it). The images are generated in the user\'s browser after your '
-				+ 'call - never output a URL or wait for one.';
+				+ 'image slots, fill them in exactly the form THAT tool documents, with a prompt describing '
+				+ 'the picture (no text, letters or numbers in it). The images are generated in the user\'s '
+				+ 'browser after your call - never output a URL or wait for one.';
 		}
 		if (choice === false) {
 			return ' Generate NO imagery in what you draw: leave every image slot out and carry the design '
@@ -942,8 +968,8 @@ class AgentManager {
 		// requested component's tool when the surface named one, free choice
 		// otherwise ("Any (AI decides)").
 		const isGenerate = (mode === 'generate');
-		const tools = (isConvert || isGenerate) ? (isGenerate ? this._toolsForComptype(comptype, true) : [])
-			: this._toolsForComptype(comptype, isSimilar);
+		const tools = (isConvert || isGenerate) ? (isGenerate ? this._toolsForComptype(comptype, true, mode) : [])
+			: this._toolsForComptype(comptype, isSimilar, mode);
 		const wantsResearch = !isConvert && this._toolWantsResearch(tools);
 
 		if (!prompt) {
@@ -955,6 +981,13 @@ class AgentManager {
 			// to it like any other, but the user is told why, because unlike every
 			// other local generation this one spends their credits.
 			const media = this._mediaComptypeEntry(comptype);
+			// Say it out loud: from the editor this looks like "the local agent was
+			// ignored and MockFlow AI ran instead", and the catalog reason (no entry
+			// names this comptype, or its only tool is HTML without
+			// clientHtmlFillsInPlace) is invisible from that side.
+			this.log('Component AI turn (' + mode + ') for ' + (comptype || 'unknown component')
+				+ ' has no local tool in the catalog' + (media ? ' (media component)' : '')
+				+ ' - falling back to MockFlow AI.');
 			return sendToTab({
 				t: 'compgen-done', id: turnId, ok: false, fallback: true,
 				error: 'No local tool for component ' + comptype,
@@ -981,7 +1014,15 @@ class AgentManager {
 		// Create/Modify fill the component in place: arm the capture so the agent's
 		// render_<tool> call routes back to this tab instead of drawing new.
 		// Convert and create-similar draw a NEW component, so no capture.
-		if (!isConvert && !isSimilar && !isGenerate) hub.setCapture(tab.projectid, turnId, sendToTab);
+		// htmlFill: this fill runs through an HTML-conversion tool, so the draw lands
+		// in boardHub.drawHtml rather than captureOrDraw - the capture carries the flag
+		// so drawHtml knows this one is a fill and not an unrelated agent's draw.
+		const isFill = !isConvert && !isSimilar && !isGenerate;
+		// tab.ws pins the result to the tab that started this turn: resolving by board
+		// alone picks the first tab showing it, which is a different tab when the user
+		// has the same board open twice - and that one has no turn waiting.
+		if (isFill) hub.setCapture(tab.projectid, turnId, sendToTab,
+			{ html: this._toolFillsFromHtml(tools), ws: tab.ws });
 		// Convert and prompt-box generations draw a NEW component; tag it with its
 		// source so the client connects and positions it relative to that source
 		// (parity with the server flow's fromconvert).
