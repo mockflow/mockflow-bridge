@@ -13,6 +13,7 @@
 
 const config = require('./config');
 const debug = require('./debug');
+const election = require('./electionRules');
 
 const PROTOCOL_VERSION = '2025-03-26';
 
@@ -162,6 +163,10 @@ class McpEndpoint {
 		this.catalogSource = opts.catalogSource;
 		this.hub = opts.hub;
 		this.genCap = opts.genCap || null;
+		// projectid -> how many times this turn's declaration has been sent back for
+		// not matching the user's words. Bounded, so a model that keeps naming the
+		// same component cannot bounce forever (see declare_render).
+		this.heldDeclares = new Map();
 		this.log = opts.log || function() {};
 	}
 
@@ -393,35 +398,83 @@ class McpEndpoint {
 							+ 'available, and it proposes the batch with plan_board itself. Nothing has failed and '
 							+ 'nothing is missing.');
 					}
-					const dEntry = this._entry(want);
-					if (!dEntry) {
+					if (!this._entry(want)) {
 						return this._err('Unknown render tool "' + want + '". Name one of this server\'s render_* tools, '
 							+ '"plan" if the request needs several different components, or "none" if nothing is being drawn.');
 					}
+					// A component the user alone can ask for (a clickable prototype) is held
+					// to the words they actually used - the catalog states the rule and this
+					// applies it, because the line in the menu saying so was read and passed
+					// over often enough to be worth enforcing. See electionRules.
+					const heldD = election.hold(this.registry, want, this._userWords(board));
+					if (heldD.held) {
+						this.log('[declare] ' + heldD.from + ' -> ' + heldD.tool + ': the user\'s own words ask for '
+							+ 'nothing ' + election.wordsPhrase(heldD.words, 3).replace(/"/g, '') + ' ('
+							+ heldD.source + ' rule)');
+						// SENT BACK, not swapped. The component asked for may be the one that
+						// carries a whole product in a single call, while the one it is held to
+						// carries a single screen - so accepting the swap silently turns "build
+						// a movie streaming app" into one wireframe. Correcting the type also
+						// re-opens how MANY, and that is the agent's to answer, so it declares
+						// again. Bounded: a second attempt at the same thing is settled below
+						// rather than bounced, so this can never loop.
+						// Keyed by the request too, so the count belongs to THIS turn: a turn
+						// that ended mid-bounce never spends the next one's first attempt.
+						const bkey = (board || '') + '|' + this._userWords(board).slice(0, 120);
+						const tries = (this.heldDeclares.get(bkey) || 0) + 1;
+						this.heldDeclares.set(bkey, tries);
+						if (tries < 2) {
+							return this._err(heldD.from + ' is only for a request whose OWN words ask for one ('
+								+ election.wordsPhrase(heldD.words, 4) + '), and this one does not - the user asked '
+								+ 'for: "' + this._userWords(board).slice(0, 200) + '". Nothing has failed and nothing '
+								+ 'is missing; you are still in the deciding step. Decide again and call '
+								+ 'declare_render once more with the right choice: "' + heldD.tool + '" if this is ONE '
+								+ 'screen or surface, or "plan" if it covers SEVERAL - a whole app, site, dashboard or '
+								+ 'product flow is one ' + heldD.tool + ' per screen, which is a plan.');
+						}
+						this.log('[declare] settling on ' + heldD.tool + ' - asked twice');
+					}
+					this.heldDeclares.delete((board || '') + '|' + this._userWords(board).slice(0, 120));
+					const declared = heldD.tool;
+					const dEntry = this._entry(declared);
 					const dLabel = dEntry.planUILabel || dEntry.planUIType
-						|| want.replace(/^render_/, '').replace(/_/g, ' ');
+						|| declared.replace(/^render_/, '').replace(/_/g, ' ');
 					const self4 = this;
 					// Recorded now, not when the user answers: the deciding step's process
 					// may exit first, and its turn has to stay open for the drawing step.
-					this.hub.noteDeclared(board, want);
+					// The held flag travels with it: a correction re-opens the one-component
+					// -or-several question for the drawing step (see agentManager).
+					this.hub.noteDeclared(board, declared, heldD.held);
+					// What the drawing step is told, when the choice was corrected. It names
+					// the rule rather than the component, so the agent can see why - and it
+					// re-opens the batch question, because the component it asked for may have
+					// been the one that carries a whole product in a single call while its
+					// replacement carries one screen.
+					const heldNote = heldD.held
+						? ('NOT a ' + (this._entry(heldD.from).planUILabel || heldD.from.replace(/^render_/, ''))
+							+ ': that is only for a request whose OWN words ask for it ('
+							+ election.wordsPhrase(heldD.words, 3) + '), and this one does not - so it is a '
+							+ dLabel + '. If the request covers SEVERAL screens or surfaces, call plan_board with '
+							+ 'one ' + declared + ' item per screen instead of drawing one. ')
+						: '';
 					const needsAsk = !!(dEntry.imageSlots || dEntry.mediaComponent)
 						&& this.hub.getImageChoice(board) === undefined;
 					if (needsAsk) {
 						// Ask NOW, before anything is composed. The drawing step starts
 						// when they answer.
 						this.hub.askImages(board, {
-							toolName: want, label: dLabel,
+							toolName: declared, label: dLabel,
 							kind: dEntry.mediaComponent ? 'component' : 'slots'
 						}).then(function() { self4.hub.requestCompose(board); })
 						  .catch(function() { self4.hub.requestCompose(board); });
-						return this._ok('Noted: a ' + dLabel + '. The user is being asked whether it should include '
-							+ 'AI-generated images, and the drawing step starts by itself as soon as they answer. '
-							+ 'Write nothing further now.');
+						return this._ok('Noted: a ' + dLabel + '. ' + heldNote + 'The user is being asked whether it '
+							+ 'should include AI-generated images, and the drawing step starts by itself as soon as '
+							+ 'they answer. Write nothing further now.');
 					}
 					this.hub.requestCompose(board);
-					return this._ok('Noted: a ' + dLabel + '. YOUR STEP IS OVER: call nothing else and write '
-						+ 'nothing at all. The drawing step is already starting with the render tools available, '
-						+ 'and it draws the component itself. Nothing has failed and nothing is missing.');
+					return this._ok('Noted: a ' + dLabel + '. ' + heldNote + 'YOUR STEP IS OVER: call nothing else '
+						+ 'and write nothing at all. The drawing step is already starting with the render tools '
+						+ 'available, and it draws the component itself. Nothing has failed and nothing is missing.');
 				}
 
 				case 'read_board': {
@@ -502,6 +555,23 @@ class McpEndpoint {
 							+ unknown.map(function(it) { return it && it.tool; }).join(', ')
 							+ '. Every item.tool must be a render_* tool of this server.');
 					}
+					// Third election point: a plan's items name their own tools, and a plan
+					// is how a whole-product request arrives - so the batch is exactly where
+					// a prototype item slips in for a request that never asked for one. An
+					// item is CORRECTED in place rather than refused: nothing has been
+					// composed yet (an item is a name and a brief), so the batch is still
+					// good with the right tool in it.
+					const words = this._userWords(board);
+					const swapped = [];
+					items.forEach(function(it) {
+						const h = election.hold(self2.registry, it.tool, words);
+						if (!h.held) return;
+						swapped.push(it.tool + ' -> ' + h.tool);
+						it.tool = h.tool;
+					});
+					if (swapped.length) {
+						this.log('[plan] held to the user\'s words: ' + swapped.join(', '));
+					}
 					const noBrief = items.filter(function(it) { return !it.brief || !String(it.brief).trim(); });
 					if (noBrief.length) {
 						return this._err('Every plan item needs a self-contained "brief" (what to generate: '
@@ -525,7 +595,12 @@ class McpEndpoint {
 						if (e && (e.imageSlots || e.mediaComponent)) it.imageCapable = true;
 					});
 					this.hub.startPlanPick(board, title, items);
-					return this._ok('The plan (' + items.length + ' components under "' + title + '") is now on '
+					return this._ok((swapped.length
+							? 'Corrected before it was shown (' + swapped.join('; ') + '): a component whose '
+								+ 'catalog entry reserves it for a request that asks for it in so many words '
+								+ 'cannot be planned for a request that does not. '
+							: '')
+						+ 'The plan (' + items.length + ' components under "' + title + '") is now on '
 						+ 'the user\'s screen for review. YOUR TURN IS COMPLETE: do not render anything and do '
 						+ 'not call any more tools - when the user clicks Generate Board, the chosen items are '
 						+ 'generated and arranged automatically. Briefly tell the user to review the list and '
@@ -536,6 +611,24 @@ class McpEndpoint {
 			// Catalog render_* tools.
 			const entry = this._entry(name);
 			if (!entry) return this._err('Unknown tool: ' + name);
+
+			// declare_render is only ONE of the ways a component gets elected: the
+			// drawing step can call a different tool than the one it declared, and an
+			// external MCP agent never declares at all. So the same rule applies here.
+			// REFUSED rather than swapped - what an agent writes for one of these tools
+			// is not usable by the other (a prototype's HTML wires screens together with
+			// script a wireframe has no way to run), so it has to compose the right
+			// thing rather than have its work redirected.
+			const heldR = election.hold(this.registry, name, this._userWords(board));
+			if (heldR.held) {
+				this.log('[render] refused ' + name + ': the user\'s own words do not ask for it - '
+					+ heldR.tool + ' instead (' + heldR.source + ' rule)');
+				return this._err(name + ' is only for a request whose OWN words ask for one ('
+					+ election.wordsPhrase(heldR.words, 4) + '), and this request does not - the user asked for: "'
+					+ this._userWords(board).slice(0, 200) + '". Nothing was drawn. Compose it as a '
+					+ heldR.tool + ' instead: one screen per call, or - if the request covers several screens or '
+					+ 'surfaces - call plan_board with one ' + heldR.tool + ' item per screen and stop.');
+			}
 
 			// Image slots: this component can carry AI-generated imagery, which only
 			// MockFlow can produce (and which spends the user's credits), so the user
@@ -829,6 +922,21 @@ class McpEndpoint {
 			+ (sent.length ? '. You sent: ' + sent.join(', ') : '. You sent nothing')
 			+ '. Read this tool\'s description for the exact structure and call it again with those'
 			+ ' argument names - nothing was drawn.';
+	}
+
+	/**
+	 * The user's OWN words for the turn open on this board, or '' when this turn
+	 * is not one: a component the user opened and asked to fill, a confirmed plan
+	 * generating from briefs, or an agent connected from outside the editor. A
+	 * component choice is only second-guessed against something the user actually
+	 * typed (electionRules), so '' means every choice stands.
+	 */
+	_userWords(board) {
+		if (typeof this.hub.getTurnRequest !== 'function') return '';
+		// A component AI turn fills the component the USER opened - the tool is
+		// their choice, not the agent's, and there is no election to hold.
+		if (typeof this.hub.hasCapture === 'function' && this.hub.hasCapture(board)) return '';
+		return this.hub.getTurnRequest(board) || '';
 	}
 
 	_entry(toolName) {

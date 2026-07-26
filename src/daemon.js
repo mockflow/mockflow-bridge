@@ -79,7 +79,7 @@ async function start(opts) {
 	hub.onImageRerender = function(tab, req, sendToTab) { agents.handleImageRerender(tab, req, hub, sendToTab); };
 	// Decide-then-draw: the agent said what it will draw, then (once any question
 	// is answered) the drawing step of that same chat turn runs.
-	hub.onDeclared = function(projectid, tool) { agents.noteDeclared(projectid, tool); };
+	hub.onDeclared = function(projectid, tool, held) { agents.noteDeclared(projectid, tool, held); };
 	hub.onCompose = function(projectid) { agents.resumeCompose(projectid); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly

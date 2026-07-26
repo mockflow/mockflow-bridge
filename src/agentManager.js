@@ -694,6 +694,12 @@ class AgentManager {
 		// never sees two turns, because no chat-done is sent in between.
 		const declarePhase = frame.__phase !== 'compose';
 		hub.setTurnPhase(tab.projectid, declarePhase ? 'declare' : 'compose');
+		// The user's OWN words, for the whole turn (both steps). Some components may
+		// only be chosen when the request asks for them in so many words, and that is
+		// judged against this - never against the agent's paraphrase, which turns a
+		// plain "create some UI" into whatever it felt like building. Cleared when the
+		// turn really ends (finish), so the next turn is judged on its own words.
+		hub.setTurnRequest(tab.projectid, text);
 		if (declarePhase) {
 			this.chatPhases.set(key, {
 				tab: tab, frame: frame, sendToTab: sendToTab, hub: hub,
@@ -719,8 +725,18 @@ class AgentManager {
 			systemPrompt += (frame.__declared === 'plan')
 				? ' You already decided this turn needs SEVERAL DIFFERENT components: call plan_board now '
 					+ 'with the component list and stop, and draw nothing yourself.'
-				: ' You already decided this turn draws ' + frame.__declared + ': call that tool now, and no '
-					+ 'other render tool, unless it answers with an error telling you otherwise.';
+				// A corrected choice is NOT pinned the same way: the component that was
+				// asked for may have been the one that carries a whole product in a single
+				// call, while the one it is held to carries a single screen. So the type is
+				// settled and the one-or-several question is deliberately re-opened.
+				: (frame.__declaredHeld
+					? ' This turn draws ' + frame.__declared + ' - that is settled, and no other render tool is '
+						+ 'to be used, whatever you decided earlier in this turn. What is still yours to judge is '
+						+ 'how many: if the request covers SEVERAL screens or surfaces, call plan_board with one '
+						+ frame.__declared + ' item per screen and stop; if it is one screen, call '
+						+ frame.__declared + ' once.'
+					: ' You already decided this turn draws ' + frame.__declared + ': call that tool now, and no '
+						+ 'other render tool, unless it answers with an error telling you otherwise.');
 		}
 		if (declarePhase) {
 			systemPrompt = PERSONA
@@ -728,8 +744,10 @@ class AgentManager {
 				+ 'they appear in the next step. Your ONLY job here is to call declare_render once, saying '
 				+ 'which render_* tool the request needs - "plan" when no single component covers it and it '
 				+ 'needs several different ones, or "none" when nothing is being drawn, in which '
-				+ 'case simply answer the user as usual. When you do name a tool, write NO reply text at '
-				+ 'all: the drawing step follows immediately and speaks to the user itself.';
+				+ 'case simply answer the user as usual. If it answers with an error asking you to choose '
+				+ 'again, that is still this step: read it, decide again and call declare_render once more - '
+				+ 'nothing has failed and nothing has been drawn. When your choice is accepted, write NO reply '
+				+ 'text at all: the drawing step follows immediately and speaks to the user itself.';
 		}
 		if (!this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
@@ -922,6 +940,10 @@ class AgentManager {
 			// rather than inheriting permission to spend credits. The two steps of
 			// one decide-then-draw turn are NOT two turns, so the handover keeps it.
 			if (!handingOver) hub.setImageChoice(tab.projectid, undefined);
+			// Same lifetime for the user's words: they belong to this turn, and the two
+			// steps of a decide-then-draw turn are one turn. Left behind, they would be
+			// judged against a later turn that has words of its own - or none.
+			if (!handingOver) hub.setTurnRequest(tab.projectid, '');
 			// Close any dangling step rows so the timeline never spins forever.
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
@@ -984,6 +1006,7 @@ class AgentManager {
 		const ph = this.chatPhases.get(boardKey);
 		if (ph) {
 			this.chatPhases.delete(boardKey);
+			if (ph.hub && ph.hub.setTurnRequest) ph.hub.setTurnRequest(tab.projectid, '');
 			try { ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: true, text: '' }); } catch (e) {}
 		}
 	}
@@ -1139,6 +1162,14 @@ class AgentManager {
 		// the tab answers by running this. Opening this turn's image state overwrites
 		// the outer turn's, so put back what was there when this one ends (finish()).
 		const outerTurn = hub.captureTurnState(tab.projectid);
+
+		// Whose choice the component is. Everything here but a free-choice prompt box
+		// fills or extends a component the USER opened, so there is no election to
+		// hold to their words and any inherited words are cleared for the turn (they
+		// are put back with the rest of the outer turn's state in finish). A prompt
+		// box that lets the AI decide IS an election, made from a request the user
+		// typed - so it is judged exactly like a chat turn's.
+		hub.setTurnRequest(tab.projectid, (isGenerate && !tools.length) ? prompt : '');
 
 		// Whether this component may carry AI-generated imagery. QuickSettings and
 		// the prompt box state it before the turn (a component's own "with images"
@@ -1360,11 +1391,21 @@ class AgentManager {
 		if (ph.phase1Done) this._runComposePhase(key);
 	}
 
-	/** The agent named a component in the deciding step (hub.noteDeclared). */
-	noteDeclared(projectid, tool) {
+	/**
+	 * The agent named a component in the deciding step (hub.noteDeclared).
+	 *
+	 * `held` says the endpoint corrected that choice because the user's own words
+	 * did not ask for it (electionRules). The corrected component may cover less
+	 * ground in one call than the one the agent asked for - one screen where the
+	 * other carried a whole flow - so the drawing step is told to think again about
+	 * whether this is one component or a batch, instead of being pinned to a single
+	 * component of the new type.
+	 */
+	noteDeclared(projectid, tool, held) {
 		const key = this._chatPhaseKey(projectid);
 		const ph = key && this.chatPhases.get(key);
 		if (!ph) return;
+		if (held) ph.declaredHeld = true;
 		if (tool === 'none') {
 			// Nothing is being drawn, so this step answers the user itself: its held text
 			// is released and the turn is NOT held open for a drawing step.
@@ -1398,6 +1439,7 @@ class AgentManager {
 		const known = ph.hub.getImageChoice(ph.tab.projectid);
 		if (known === true || known === false) frame.withImages = known;
 		if (ph.declaredTool) frame.__declared = ph.declaredTool;
+		if (ph.declaredHeld) frame.__declaredHeld = true;
 		this.log('[declare] drawing step starting'
 			+ ((known === true || known === false) ? ' (images ' + (known ? 'on' : 'off') + ')' : ''));
 		try { this.handleChat(ph.tab, frame, ph.sendToTab, ph.hub); }

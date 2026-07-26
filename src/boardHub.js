@@ -58,6 +58,7 @@ class BoardHub {
 		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.turnModes = new Map();    // projectid -> 'create' | 'modify' (imagery rules differ)
 		this.turnPhases = new Map();   // projectid -> 'declare' | 'compose' (decide-then-draw)
+		this.turnRequests = new Map(); // projectid -> the user's OWN words for this turn
 		this.selectedProjectId = null;
 		this.nextId = 1;
 
@@ -1044,6 +1045,32 @@ class BoardHub {
 	}
 
 	/**
+	 * What the USER typed for the turn open on this board.
+	 *
+	 * Kept because some component choices are only the user's to make: a catalog
+	 * entry can say it may be elected only when the request itself asks for it
+	 * (electionRules), and that has to be judged against the user's own words -
+	 * never the agent's paraphrase of them, which pads a plain request into
+	 * whatever the agent felt like building.
+	 *
+	 * Deliberately EMPTY for every turn that is not a user's request in their own
+	 * words (a component fill, a plan batch generating from briefs, an external MCP
+	 * client): there is nothing to judge against then, so nothing is second-guessed.
+	 */
+	setTurnRequest(projectid, text) {
+		const key = projectid || null;
+		if (!key) return;
+		const t = String(text || '').trim();
+		if (t) this.turnRequests.set(key, t);
+		else this.turnRequests.delete(key);
+	}
+
+	getTurnRequest(projectid) {
+		const key = projectid || null;
+		return (key && this.turnRequests.get(key)) || '';
+	}
+
+	/**
 	 * The declare step is finished with (the user has answered, or there was
 	 * nothing to ask): run the drawing step of the same chat turn. Wired to the
 	 * agent manager by the daemon, like onPlanGenerate.
@@ -1057,8 +1084,8 @@ class BoardHub {
 	 * user has answered anything - so the deciding step's turn is held open for
 	 * the drawing step instead of being closed when that process exits.
 	 */
-	noteDeclared(projectid, tool) {
-		if (this.onDeclared) this.onDeclared(projectid || null, tool || null);
+	noteDeclared(projectid, tool, held) {
+		if (this.onDeclared) this.onDeclared(projectid || null, tool || null, !!held);
 	}
 
 	/** Which surface this board's open turn came from ('mida', or 'cb_<cid>'). */
@@ -1085,7 +1112,8 @@ class BoardHub {
 			choice: this.imageChoices.has(key) ? this.imageChoices.get(key) : undefined,
 			surface: this.turnSurfaces.get(key) || '',
 			mode: this.turnModes.get(key) || '',
-			phase: this.turnPhases.get(key) || ''
+			phase: this.turnPhases.get(key) || '',
+			request: this.turnRequests.get(key) || ''
 		};
 	}
 
@@ -1097,6 +1125,7 @@ class BoardHub {
 		if (state.surface) this.turnSurfaces.set(key, state.surface); else this.turnSurfaces.delete(key);
 		if (state.mode) this.turnModes.set(key, state.mode); else this.turnModes.delete(key);
 		if (state.phase) this.turnPhases.set(key, state.phase); else this.turnPhases.delete(key);
+		if (state.request) this.turnRequests.set(key, state.request); else this.turnRequests.delete(key);
 	}
 
 	/** 'modify' when this turn edits something already on the board, else 'create'. */
