@@ -390,6 +390,21 @@ class AgentManager {
 	 * spawn(), writing the prompt to stdin first when _deliverPrompt routed it there,
 	 * and cleaning up a staged prompt file once the turn exits.
 	 */
+	/**
+	 * The environment every agent turn is spawned with.
+	 *
+	 * MCP_TOOL_TIMEOUT / MCP_TIMEOUT are read by the CLIs that support them and
+	 * ignored by the rest, so they are set for all: see AGENT_TOOL_TIMEOUT_MS for
+	 * why the agent must never be the one to give up on a call first. An adapter's
+	 * own env (spec.env) wins, since it knows its CLI better than this does.
+	 */
+	_turnEnv(spec) {
+		return Object.assign({}, process.env, {
+			MCP_TOOL_TIMEOUT: String(config.AGENT_TOOL_TIMEOUT_MS),
+			MCP_TIMEOUT: String(config.AGENT_TOOL_TIMEOUT_MS)
+		}, (spec && spec.env) || {});
+	}
+
 	_spawnWithPrompt(spec, delivery, opts) {
 		const self = this;
 		const spawnOpts = Object.assign({}, opts);
@@ -774,7 +789,7 @@ class AgentManager {
 		var proc;
 		try {
 			proc = this._spawnWithPrompt(spec, delivery, {
-				env: Object.assign({}, process.env, spec.env || {}),
+				env: this._turnEnv(spec),
 				cwd: ws
 			});
 		} catch (err) {
@@ -1117,6 +1132,11 @@ class AgentManager {
 		systemPrompt += ' A call that comes back with an error drew nothing and does not count as your one '
 			+ 'call: read the error, fix the arguments it names, and call the tool again (up to three tries).';
 
+		// This turn can be running INSIDE a chat turn: modify_component is a tool call
+		// the tab answers by running this. Opening this turn's image state overwrites
+		// the outer turn's, so put back what was there when this one ends (finish()).
+		const outerTurn = hub.captureTurnState(tab.projectid);
+
 		// Whether this component may carry AI-generated imagery. QuickSettings and
 		// the prompt box state it before the turn (a component's own "with images"
 		// setting), and this turn is filling a component that is waiting on it - so
@@ -1166,7 +1186,7 @@ class AgentManager {
 		var proc;
 		try {
 			proc = this._spawnWithPrompt(spec, delivery, {
-				env: Object.assign({}, process.env, spec.env || {}),
+				env: this._turnEnv(spec),
 				cwd: ws
 			});
 		} catch (err) {
@@ -1293,8 +1313,11 @@ class AgentManager {
 			hub.clearCapture(tab.projectid);
 			if (tab.projectid) hub.convertContext.delete(tab.projectid);
 			hub.selectedProjectId = prevSelected;
-			// This turn's image answer dies with the turn (see the chat path).
-			hub.setImageChoice(tab.projectid, undefined);
+			// This turn's image answer dies with the turn (see the chat path) - but
+			// this turn may be one a chat turn is waiting on, and that one's answer,
+			// surface and mode outlive it. Restoring covers both: an outer turn gets
+			// its own state back, a standalone turn is left with none.
+			hub.restoreTurnState(outerTurn);
 			for (var k in openSteps) {
 				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
 			}
@@ -1456,7 +1479,7 @@ class AgentManager {
 		var proc;
 		try {
 			proc = this._spawnWithPrompt(spec, delivery, {
-				env: Object.assign({}, process.env, spec.env || {}),
+				env: this._turnEnv(spec),
 				cwd: ws
 			});
 		} catch (err) {
@@ -1578,7 +1601,7 @@ class AgentManager {
 		var proc;
 		try {
 			proc = this._spawnWithPrompt(spec, delivery, {
-				env: Object.assign({}, process.env, spec.env || {}),
+				env: this._turnEnv(spec),
 				cwd: ws
 			});
 		} catch (err) {

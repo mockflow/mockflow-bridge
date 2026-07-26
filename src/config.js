@@ -107,6 +107,17 @@ module.exports = {
 	// runs a server-side HTML render (Puppeteer) or an S3 upload before drawing,
 	// so these calls legitimately take far longer than a plain draw.
 	HTML_TOOL_TIMEOUT_MS: 180000,
+	// How long the AGENT is told to wait on one of this server's tool calls.
+	//
+	// The CLIs time MCP calls out on their own clock, and their default is around
+	// a minute - shorter than several tools here legitimately take (a modify runs
+	// a whole component AI turn in the tab; an HTML render runs Puppeteer). When
+	// the agent gives up first the bridge is still working, so the tool "fails",
+	// the agent retries, and the same expensive work runs twice - twice the
+	// credits, and a component modified two times over. This must therefore stay
+	// comfortably ABOVE the longest timeout above; the bridge's own timeouts stay
+	// the ones that decide when a call has really failed.
+	AGENT_TOOL_TIMEOUT_MS: 600000,
 	READ_TIMEOUT_MS: 20000,
 	// Connected-source calls (list_source_tools / call_source_tool): the tab
 	// relays to MockFlow, which runs the third-party API call (Notion, Jira,

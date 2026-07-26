@@ -412,8 +412,18 @@ class McpEndpoint {
 					}
 					// The tab owns the component's current data, so it builds the modify
 					// prompt and runs the edit; this only carries the request.
+					//
+					// surface: the tab answers this by running a component AI turn of its
+					// own, and anything that turn asks the user must be asked where THIS
+					// turn is being read - the Concept Builder that called the tool, not
+					// whatever a turn with no surface of its own falls back to.
 					const res = await this.hub.runOnBoard(args.projectid || board || null,
-						{ t: 'modify', cid: String(args.componentId), instruction: String(args.instruction) },
+						{
+							t: 'modify',
+							cid: String(args.componentId),
+							instruction: String(args.instruction),
+							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(board) : ''
+						},
 						config.HTML_TOOL_TIMEOUT_MS);
 					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
 				}

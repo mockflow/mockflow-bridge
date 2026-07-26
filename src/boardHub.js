@@ -897,6 +897,44 @@ class BoardHub {
 		if (this.onDeclared) this.onDeclared(projectid || null, tool || null);
 	}
 
+	/** Which surface this board's open turn came from ('mida', or 'cb_<cid>'). */
+	getTurnSurface(projectid) {
+		const key = projectid || null;
+		return (key && this.turnSurfaces.get(key)) || '';
+	}
+
+	/**
+	 * Everything about the turn currently open on this board.
+	 *
+	 * A turn can run INSIDE another one: modify_component is a tool call in a chat
+	 * turn, and the tab answers it by running a whole component AI turn of its own.
+	 * All of this state is keyed by board alone, so the inner turn opening its own
+	 * would otherwise overwrite the outer one's - and clearing it at the end would
+	 * leave the outer turn with none at all. That is how a Concept Builder's image
+	 * question ended up being asked in Ask Mida. Capture before, restore after.
+	 */
+	captureTurnState(projectid) {
+		const key = projectid || null;
+		if (!key) return null;
+		return {
+			key: key,
+			choice: this.imageChoices.has(key) ? this.imageChoices.get(key) : undefined,
+			surface: this.turnSurfaces.get(key) || '',
+			mode: this.turnModes.get(key) || '',
+			phase: this.turnPhases.get(key) || ''
+		};
+	}
+
+	restoreTurnState(state) {
+		if (!state || !state.key) return;
+		const key = state.key;
+		if (state.choice === true || state.choice === false) this.imageChoices.set(key, state.choice);
+		else this.imageChoices.delete(key);
+		if (state.surface) this.turnSurfaces.set(key, state.surface); else this.turnSurfaces.delete(key);
+		if (state.mode) this.turnModes.set(key, state.mode); else this.turnModes.delete(key);
+		if (state.phase) this.turnPhases.set(key, state.phase); else this.turnPhases.delete(key);
+	}
+
 	/** 'modify' when this turn edits something already on the board, else 'create'. */
 	getTurnMode(projectid) {
 		const key = projectid || null;
