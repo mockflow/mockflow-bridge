@@ -187,6 +187,17 @@ class AgentManager {
 		return false;
 	}
 
+	/** True if any of these tools answers with a whole HTML document
+	 *  (catalog `clientIsHtmlConversion`), which takes minutes to write. */
+	_toolsAreHtml(toolNames) {
+		if (!this.registry || !toolNames || !toolNames.length) return false;
+		for (var i = 0; i < this.registry.length; i++) {
+			var e = this.registry[i];
+			if (e.clientIsHtmlConversion && toolNames.indexOf(e.mcpToolName) !== -1) return true;
+		}
+		return false;
+	}
+
 	/** True if any of these tools is a real-world/current-data component
 	 *  (catalog `webResearch` flag). */
 	_toolWantsResearch(toolNames) {
@@ -567,10 +578,32 @@ class AgentManager {
 		// somewhere to state it: the component's own "with images" setting, or the
 		// prompt box's checkbox.
 		if (choice === undefined && askable === false) choice = false;
-		// Editing an existing component is not composing a new one: the imagery
-		// rules that follow have to know which this is.
-		const turnMode = (frame && frame.mode === 'modifyai') ? 'modify' : 'create';
+		// Working from something already on the board is not composing something new,
+		// and the imagery rules below have to know which this is. An EDIT, a CONVERSION
+		// and a NEW SCREEN FROM A REFERENCE all arrive carrying that thing's existing
+		// pictures, so "no images" from the user means "add no new ones" - it has never
+		// meant "delete the ones that are already there".
+		const mode = (frame && frame.mode) || '';
+		// A CREATE can be built from board content too - converting wireframes into a
+		// prototype hands the agent those wireframes, images and all - and the mode alone
+		// cannot tell. The editor says so with fromExisting; the modes below are the cases
+		// that are always true by definition.
+		const fromExisting = (frame && frame.fromExisting === true)
+			|| mode === 'modifyai' || mode === 'convertai' || mode === 'createsimilar';
+		const turnMode = fromExisting ? 'modify' : 'create';
 		hub.setImageChoice(tab.projectid, choice, (frame && frame.surface) || 'mida', turnMode);
+		if (choice === true && fromExisting) {
+			return ' Every picture already in what you were given STAYS: copy each image reference across '
+				+ 'exactly as it is, and never swap a real picture for a placeholder. On top of that the user '
+				+ 'has agreed to new imagery, so where the change genuinely calls for a NEW picture, add a slot '
+				+ 'in exactly the form that render tool documents, with a prompt describing it (no text, letters '
+				+ 'or numbers in it). New images are generated in the user\'s browser after your call - never '
+				+ 'output a URL or wait for one.';
+		}
+		if (choice === false && fromExisting) {
+			return ' Add NO new imagery. Every picture already in what you were given STAYS: copy each image '
+				+ 'reference across exactly as it is, and never drop one or swap a real picture for a placeholder.';
+		}
 		if (choice === true) {
 			// The slot form belongs to the TOOL, not to this sentence: component data
 			// takes a token, a document takes the attribute its own markup documents.
@@ -585,7 +618,9 @@ class AgentManager {
 			return ' Generate NO imagery in what you draw: leave every image slot out and carry the design '
 				+ 'with colour, type and shapes instead.';
 		}
-		return ' Render without image slots. If a render tool answers that the user is being asked about '
+		return (fromExisting ? ' Every picture already in what you were given stays: copy each image reference '
+				+ 'across exactly as it is.' : '')
+			+ ' Render without image slots. If a render tool answers that the user is being asked about '
 			+ 'images, your turn is over and the component is drawn for you once they answer: say so briefly '
 			+ 'and stop, do not call anything else.';
 	}
@@ -1108,11 +1143,21 @@ class AgentManager {
 			systemPrompt: systemPrompt,
 			allowedTools: allowed,
 			mockflowTools: this._mockflowToolNames(),
-			partialMessages: false
+			// Announce the render tool the moment the model STARTS writing it, instead of
+			// when the whole call is written. For a tool whose argument is a document that
+			// is minutes of silence, and the last thing on screen stays whatever ran before
+			// it - so the turn looks stuck on that. (The plan turn uses it for this reason.)
+			partialMessages: true
 		}, delivery));
 
 		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
 			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + ws);
+		// A tool whose whole answer is a document (a wireframe, a prototype) is written in
+		// ONE tool call, and nothing reaches the timeline until that call is complete - so
+		// several silent minutes are normal here and look exactly like a hang. Say so once.
+		if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
+			this.log('  (' + tools.join('/') + ' writes the whole document in one call - '
+				+ 'expect a few minutes with no visible steps)');
 		// What the CLI was actually asked to do. Every "it behaved differently than
 		// when I ran it by hand" bug so far came down to a flag the turn did or did
 		// not carry, and there is no other way to see the spawned command line.
@@ -1142,6 +1187,25 @@ class AgentManager {
 		var skipIds = {};
 		var pendingDeliveryRead = !!deliveryTool;
 
+		// ---- liveness in the Activity log ------------------------------------------
+		// Writing a document-sized tool argument takes minutes during which the agent
+		// produces no EVENTS, only stream deltas - so the feed's last line stays whatever
+		// ran before it and the turn reads as hung. This says, every 30s, that it is alive,
+		// what it is doing, and how much has come back, which is the difference between
+		// "still writing, 34KB so far" and a genuinely stuck process.
+		var turnStart = Date.now();
+		var streamBytes = 0;
+		var lastOutputAt = Date.now();
+		var doing = 'thinking';
+		var ticker = setInterval(function() {
+			var secs = Math.round((Date.now() - turnStart) / 1000);
+			var quiet = Math.round((Date.now() - lastOutputAt) / 1000);
+			self.log('  … ' + doing + ' (' + (secs >= 60 ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's' : secs + 's')
+				+ (streamBytes ? ', ' + Math.round(streamBytes / 1024) + 'KB received' : '')
+				+ (quiet >= 60 ? ', nothing for ' + Math.round(quiet / 60) + 'm' : '') + ')');
+		}, 30000);
+		if (ticker.unref) ticker.unref();
+
 		function handleLine(line) {
 			var events = self.agent.parseLine(line);
 			for (var e = 0; e < events.length; e++) {
@@ -1162,19 +1226,30 @@ class AgentManager {
 					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
 					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
 							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+					// With partial messages this fires as the model STARTS writing the call,
+					// so from here on the wait belongs to that tool, not to "thinking".
+					doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
+					self.log('  ' + doing + '…');
 					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
 				} else if (ev.type === 'tool-end') {
 					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; continue; }
 					var open = openSteps[ev.id];
 					if (open) {
 						delete openSteps[ev.id];
+						var took = Math.round((Date.now() - open.started) / 1000);
+						self.log('  ' + (ev.ok === false ? 'failed' : 'done') + ' after ' + took + 's');
 						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
 					}
+					doing = 'thinking';
 				}
 			}
 		}
 
 		proc.stdout.on('data', function(chunk) {
+			// Volume, not events: while a document-sized tool argument streams in this is
+			// the only thing that moves, and it is what makes the heartbeat meaningful.
+			streamBytes += chunk.length;
+			lastOutputAt = Date.now();
 			buf += chunk.toString();
 			var nl;
 			while ((nl = buf.indexOf('\n')) >= 0) {
@@ -1202,6 +1277,15 @@ class AgentManager {
 		function finish(ok, error, fallback) {
 			if (finished) return;
 			finished = true;
+			clearInterval(ticker);
+			// One closing line with what the turn actually cost, so a slow component is
+			// something you can see rather than something you have to time by hand.
+			var totalSecs = Math.round((Date.now() - turnStart) / 1000);
+			self.log('Component AI turn ' + (ok ? 'finished' : 'ended') + ' in '
+				+ (totalSecs >= 60 ? Math.floor(totalSecs / 60) + 'm' + (totalSecs % 60) + 's' : totalSecs + 's')
+				+ (streamBytes ? ' (' + Math.round(streamBytes / 1024) + 'KB from the agent)' : '')
+				+ (fallback ? ' - falling back to MockFlow AI' : '')
+				+ (error ? ': ' + error : ''));
 			self.compgenProcs.delete(key);
 			// A still-armed capture (create/modify) means the agent never produced
 			// the data - drop it and let the client fall back to the server.

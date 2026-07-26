@@ -59,9 +59,10 @@ const INSTRUCTIONS =
 // per-component: "keep what is there" is the same instruction for a moodboard,
 // a design and a document, and it is the opposite of the create-time rules.
 const MODIFY_IMAGERY =
-	'THIS IS A MODIFY of something already on the board, so its EXISTING imagery stays. Copy every '
-	+ 'image reference you were given across exactly as it is and give it no new prompt - never drop a '
-	+ 'picture that is already there, and never replace a real picture with a placeholder.';
+	'THIS RENDER IS BUILT FROM SOMETHING ALREADY ON THE BOARD - an edit of it, a conversion of it, or a '
+	+ 'new screen matching it - so its EXISTING imagery stays. Copy every image reference you were given '
+	+ 'across exactly as it is and give it no new prompt - never drop a picture that is already there, '
+	+ 'and never replace a real picture with a placeholder.';
 
 const BRIDGE_TOOLS = [
 	{
