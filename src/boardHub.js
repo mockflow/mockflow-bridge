@@ -583,8 +583,13 @@ class BoardHub {
 	 * kept on the plan so every counted draw can push a {t:'plan-progress'} frame
 	 * back - that is what drives Mida's "Generated X of Y items…" loader, the same
 	 * line the server multiboard flow writes from ai-multiboard-progress.
+	 *
+	 * `shape` (optional) is the batch as the user confirmed it: `tools` in draw
+	 * order and `images` (a boolean per item). Imagery is answered PER ITEM on the
+	 * plan card, so it cannot be carried as one flag for the board - two
+	 * image-capable components in one plan are two separate answers.
 	 */
-	armPlan(projectid, boardTitle, itemCount, send) {
+	armPlan(projectid, boardTitle, itemCount, send, shape) {
 		const self = this;
 		const target = this._targetTab(projectid || null);
 		const key = target.tab.projectid || target.tab.id;
@@ -597,6 +602,8 @@ class BoardHub {
 					total: itemCount,
 					done: 0,
 					send: send || null,
+					toolByItem: (shape && shape.tools) || null,
+					imageByItem: (shape && shape.images) || null,
 					expires: Date.now() + config.PLAN_TIMEOUT_MS
 				});
 				self.log('[plan] armed "' + boardTitle + '" on board ' + key + ': ' + itemCount + ' item(s)'
@@ -647,24 +654,58 @@ class BoardHub {
 					self.log('[plan] picker skipped on board ' + key);
 					return;
 				}
-				// The picker's image answer covers the whole batch: it is recorded
-				// BEFORE the generation turn starts, so that turn never has to stop
-				// and ask (which would abandon the items after the one that asked).
+				// The picker's image answers are recorded BEFORE the generation turn
+				// starts, so that turn never has to stop and ask (which would abandon
+				// the items after the one that asked).
+				//
+				// They are answered PER ITEM on the card - one toggle per image-capable
+				// row, or one shared toggle for a cohesive set of screens - so they are
+				// carried per item all the way to the draw. Collapsing them to a single
+				// board flag is what made ticking images on one component put images on
+				// every component in the batch.
+				const perItem = (res && res.itemImages) || null;
 				const batchImages = !!(res && res.withImages);
-				var chosen = items;                // auto reply (no picker UI) -> full plan
-				if (res && Array.isArray(res.items)) {
-					var sel = res.items.map(function(i) { return items[i]; }).filter(Boolean);
-					if (!sel.length) {
-						self.log('[plan] picker returned an empty selection on board ' + key + ' - nothing generated');
-						return;
-					}
-					chosen = sel;
+				// Indices into the ORIGINAL plan, which is how itemImages is keyed. An
+				// auto reply (a tab with no picker UI) confirms the whole plan.
+				var chosenIdx = (res && Array.isArray(res.items))
+					? res.items.filter(function(i) { return !!items[i]; })
+					: items.map(function(_, i) { return i; });
+				if (res && Array.isArray(res.items) && !chosenIdx.length) {
+					self.log('[plan] picker returned an empty selection on board ' + key + ' - nothing generated');
+					return;
 				}
+				var chosen = chosenIdx.map(function(i) { return items[i]; });
+				const chosenImages = chosenIdx.map(function(i) {
+					if (perItem && (perItem[i] === true || perItem[i] === false)) return perItem[i];
+					// The card stamps a toggle on every image-capable row, so once it has
+					// sent answers at all, an item with none had no toggle to answer: it
+					// cannot carry imagery. Reading that as "inherit whatever another item
+					// said" is what spread one ticked component's images across the batch.
+					if (perItem) return false;
+					// Only a tab too old to send per-item answers, or an auto reply with no
+					// picker UI, falls back to one flag for everything.
+					return batchImages;
+				});
 				self.log('[plan] confirmed on board ' + key + ': ' + chosen.length + ' of ' + items.length
 					+ ' item(s) [' + chosen.map(function(it) { return it.tool; }).join(', ') + ']'
 					+ (res && res.auto ? ' (auto - no picker UI in the tab)' : ''));
+				// The picker's imagery answers, exactly as the tab sent them. A batch that
+				// draws correctly but with the wrong pictures looks identical whether a
+				// toggle never arrived, arrived off, or arrived on for the wrong item.
+				self.log('[plan] imagery answers: withImages=' + (res && res.withImages)
+					+ ' itemImages=' + JSON.stringify((res && res.itemImages) || null)
+					+ ' -> per item [' + chosen.map(function(it, n) {
+						return (it.tool || '?') + '=' + (chosenImages[n] ? 'ON' : 'off');
+					}).join(', ') + ']');
+				// Board-level fallback for anything the per-item cursor cannot place (and
+				// for the tools/list branch, which is one description for the whole turn):
+				// ON when ANY item wants imagery, so the agent is told the slot form it
+				// needs. WHICH items actually keep their slots is enforced per draw.
 				self.setImageChoice(key, batchImages, 'mida', 'create');
-				return self.armPlan(projectid, boardTitle, chosen.length, sendToTab).then(function() {
+				return self.armPlan(projectid, boardTitle, chosen.length, sendToTab, {
+					tools: chosen.map(function(it) { return it.tool || ''; }),
+					images: chosenImages
+				}).then(function() {
 					// Opens Mida's generation loader before the agent turn spawns, so the
 					// chat never sits silent between the click and the first draw.
 					sendToTab({
@@ -672,7 +713,10 @@ class BoardHub {
 						items: chosen.map(function(it) { return { name: it.name || '', tool: it.tool || '' }; })
 					});
 					if (self.onPlanGenerate)
-						self.onPlanGenerate(target.tab, { boardTitle: boardTitle, items: chosen, withImages: batchImages }, sendToTab);
+						self.onPlanGenerate(target.tab, {
+							boardTitle: boardTitle, items: chosen,
+							withImages: batchImages, itemImages: chosenImages
+						}, sendToTab);
 					else
 						sendToTab({ t: 'plan-done', ok: false, error: 'Plan generation is not enabled on this bridge.' });
 				});
@@ -705,6 +749,40 @@ class BoardHub {
 	 * {arranged, boardTitle, count} so the tool result can tell the agent the
 	 * board is done. Resolves null when no plan is active (the normal case).
 	 */
+	/**
+	 * The imagery answer for the draw about to happen, when a plan batch is armed.
+	 *
+	 * Imagery is answered per item on the plan card, so a batch holding two
+	 * image-capable components holds two answers; a single board-level flag would
+	 * give both whatever either one said. Draws land in plan order (the same
+	 * assumption the generation timeline already names each row from), so the item
+	 * being drawn is the one at the plan's cursor - `done` counts completed draws,
+	 * and this is called before the current one is counted.
+	 *
+	 * The cursor is TRUSTED ONLY when its tool matches the call. A retry after a
+	 * failed render, or an agent that reorders, would otherwise read the wrong
+	 * item's answer, so those fall back to the nearest undrawn item using this
+	 * tool. Returns undefined when there is no plan, which leaves the ordinary
+	 * board-level choice in charge.
+	 */
+	plannedImageChoice(projectid, toolName) {
+		var key = projectid;
+		if (!key) {
+			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
+		}
+		const plan = key ? this.plans.get(key) : null;
+		if (!plan || !plan.imageByItem || !plan.toolByItem) return undefined;
+		const at = plan.done;
+		if (plan.toolByItem[at] === toolName) return !!plan.imageByItem[at];
+		for (var j = at + 1; j < plan.toolByItem.length; j++) {
+			if (plan.toolByItem[j] === toolName) return !!plan.imageByItem[j];
+		}
+		for (var k = 0; k < plan.toolByItem.length; k++) {
+			if (plan.toolByItem[k] === toolName) return !!plan.imageByItem[k];
+		}
+		return undefined;
+	}
+
 	_notePlannedDraw(key) {
 		if (!key) return Promise.resolve(null);
 		const plan = this.plans.get(key);

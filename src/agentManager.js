@@ -1553,8 +1553,15 @@ class AgentManager {
 		for (var i = 0; i < items.length; i++) toolSet['mcp__mockflow__' + items[i].tool] = true;
 		var allowed = Object.keys(toolSet).join(',');
 
+		// Imagery is answered per row on the plan card, so it is stated per item here.
+		// Without it a mixed batch reads as one instruction and every image-capable
+		// item gets pictures, including the ones the user left switched off.
+		const perImages = (plan && plan.itemImages) || null;
 		const lines = items.map(function(it, i) {
-			return (i + 1) + '. ' + (it.name || 'Item') + ' [tool: ' + it.tool + ']: ' + (it.brief || '');
+			var img = '';
+			if (perImages && (perImages[i] === true || perImages[i] === false))
+				img = perImages[i] ? ' [WITH images]' : ' [NO images]';
+			return (i + 1) + '. ' + (it.name || 'Item') + ' [tool: ' + it.tool + ']' + img + ': ' + (it.brief || '');
 		});
 		const prompt = 'The user confirmed this board plan - render it now.\n'
 			+ 'Board: "' + (plan.boardTitle || 'Board') + '"\nItems (render in this order):\n' + lines.join('\n');
@@ -1566,11 +1573,25 @@ class AgentManager {
 			+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
 			+ 'the plan, do not chat, and never output a URL or a link.';
 
-		// The picker already asked about imagery for the whole batch, so this turn
-		// starts with the answer in hand. askable:false is the important half - a
-		// batch must NEVER stop to ask, because ending the turn mid-plan abandons
-		// every item after the one that asked (and with them the auto-arrange).
+		// The picker already asked about imagery, so this turn starts with the answers
+		// in hand. askable:false is the important half - a batch must NEVER stop to
+		// ask, because ending the turn mid-plan abandons every item after the one that
+		// asked (and with them the auto-arrange). This opens the turn on the ANY-item
+		// answer, which is what the tool descriptions are built from; the per-item
+		// answers below, and the per-draw gate in mcpEndpoint, decide which items keep
+		// their slots.
 		systemPrompt += this._openImageTurn(hub, tab, { surface: 'mida', withImages: !!plan.withImages }, false);
+
+		// The sentence above is one instruction for the turn, but the answers are per
+		// item, so a batch where they differ needs saying explicitly. Only when they
+		// actually differ: on a uniform batch this would be noise contradicting nothing.
+		if (perImages && perImages.indexOf(true) !== -1 && perImages.indexOf(false) !== -1) {
+			systemPrompt += ' IMAGERY IS PER ITEM IN THIS BATCH, and the user chose it item by item: '
+				+ 'every item above is marked [WITH images] or [NO images]. Put image slots ONLY in the '
+				+ 'items marked [WITH images], and compose the [NO images] ones to carry themselves with '
+				+ 'colour, type and shapes. Slots in an item the user did not ask for them in are dropped, '
+				+ 'so an item built around pictures it never receives arrives broken.';
+		}
 
 		// Same gate as the component path: when the plan contains a real-world /
 		// current-data component (catalog `webResearch`), let the agent ground the
@@ -1597,6 +1618,12 @@ class AgentManager {
 			partialMessages: true
 		}, delivery));
 
+		// What the batch turn will actually be served: the hub value is what
+		// mcpEndpoint reads for every render in this turn, so if it disagrees with
+		// plan.withImages the answer was lost between the picker and here.
+		this.log('[plan] imagery for this batch: per item=' + JSON.stringify(perImages)
+			+ ' anyOn=' + !!plan.withImages
+			+ ' hub.getImageChoice=' + hub.getImageChoice(tab.projectid));
 		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
 			+ items.map(function(it) { return it.tool; }).join(', ') + ']'
 			+ (delivery.file ? ' (prompt via file)' : delivery.stdin != null ? ' (prompt via stdin)' : ''));

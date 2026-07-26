@@ -542,7 +542,12 @@ class McpEndpoint {
 			// is asked first. The question does NOT block this call - see _imageGate.
 			const gate = this._imageGate(board, entry, name, args);
 			if (gate) return this._ok(gate);
-			const withImages = !!(entry.imageSlots && this.hub.getImageChoice(board) === true);
+			// Inside a confirmed plan this is the item's OWN answer, not the board's:
+			// the plan card asks per image-capable row, so a batch can hold both a
+			// component the user wants pictures in and one they do not. The tab empties
+			// any slot that arrives without agreement, which makes this the enforcement
+			// point rather than the prompt.
+			const withImages = !!(entry.imageSlots && this._imagesForDraw(board, name));
 
 			return await this._draw(board, entry, name, args, withImages);
 		} catch (err) {
@@ -831,6 +836,19 @@ class McpEndpoint {
 			if (this.registry[i].mcpToolName === toolName) return this.registry[i];
 		}
 		return null;
+	}
+
+	/**
+	 * Whether THIS draw may carry imagery: the plan item's own answer when a
+	 * confirmed batch is running, otherwise the board-level answer for the turn.
+	 * An older hub without per-item plans simply falls through to the latter.
+	 */
+	_imagesForDraw(board, toolName) {
+		if (typeof this.hub.plannedImageChoice === 'function') {
+			const perItem = this.hub.plannedImageChoice(board, toolName);
+			if (perItem === true || perItem === false) return perItem;
+		}
+		return this.hub.getImageChoice(board) === true;
 	}
 
 	_ok(text) {
