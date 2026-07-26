@@ -256,23 +256,28 @@ class McpEndpoint {
 	_declareToolDef() {
 		const names = ['none', 'plan'];
 		const lines = [];
+		// "plan" is described from the catalog like every other choice. Left bare it
+		// was the one option in a thirty-item menu with nothing beside it, so the
+		// requests that need it - a whole app, which is one wireframe per screen -
+		// went to whichever single component happened to read closest instead.
+		lines.push('plan - ' + this._declareLine(this._entry('plan_board'),
+			'Several DIFFERENT components at once (a plan, workspace, dashboard or kit).'));
 		for (var i = 0; i < this.registry.length; i++) {
 			const e = this.registry[i];
 			if (!e.mcpToolName || e.mcpToolName.indexOf('render_') !== 0) continue;
 			names.push(e.mcpToolName);
-			var first = String(e.mcpDescription || '').split(/\n|(?<=\.)\s/)[0].trim();
-			if (first.length > 120) first = first.slice(0, 117) + '...';
-			lines.push(e.mcpToolName + ' - ' + first);
+			lines.push(e.mcpToolName + ' - ' + this._declareLine(e, ''));
 		}
 		return {
 			name: 'declare_render',
 			description: 'FIRST STEP of a drawing request: say WHICH component you are about to create, before you '
 				+ 'create it. The render tools are deliberately not available to you yet - they appear once this is '
-				+ 'answered. Pass one of the names below EXACTLY as written; do not invent one. Name the ONE component '
-				+ 'that covers the request - a component that is itself multi-part (many screens, scenes or steps '
-				+ 'inside one artifact) is one component, so it belongs here, not in a plan. Pass "plan" when no single '
-				+ 'component can carry the request and it genuinely needs SEVERAL DIFFERENT ones (a plan, workspace, '
-				+ 'dashboard or kit): the drawing step then proposes the batch with plan_board. If the user is NOT '
+				+ 'answered. Pass one of the names below EXACTLY as written; do not invent one. The line beside each '
+				+ 'name says WHEN to pick it and decides this on its own: whether a many-screen request is one '
+				+ 'component or several is stated there per component, so read the lines and follow them rather '
+				+ 'than assuming either way. Pass "plan" when no single component can carry the request and it '
+				+ 'genuinely needs SEVERAL DIFFERENT ones: the drawing step then proposes the batch with '
+				+ 'plan_board. If the user is NOT '
 				+ 'asking for anything to be drawn (a question, a chat, a change to something already on the board), '
 				+ 'pass "none" and carry on answering normally.\n\nWhat you may name:\n' + lines.join('\n'),
 			inputSchema: {
@@ -283,6 +288,25 @@ class McpEndpoint {
 				required: ['tool']
 			}
 		};
+	}
+
+	/**
+	 * The one line describing a component in the deciding step's menu.
+	 *
+	 * `mcpDeclareLine` is the catalog's own statement of WHEN to pick a tool - the
+	 * counterpart of the server classifier's detectionPromptDescription, which is
+	 * likewise a field of its own rather than the head of the generation prompt.
+	 * The opening sentence of mcpDescription is only the fallback, for a catalog
+	 * that predates the field: it says what a tool DOES, and a description-shaped
+	 * one ("Convert HTML to an editable UI wireframe") carries no signal at all for
+	 * "create a mobile CRM app", which is how those requests reached the prototype.
+	 */
+	_declareLine(entry, fallback) {
+		if (!entry) return fallback;
+		if (entry.mcpDeclareLine) return String(entry.mcpDeclareLine).trim();
+		var first = String(entry.mcpDescription || '').split(/\n|(?<=\.)\s/)[0].trim();
+		if (first.length > 120) first = first.slice(0, 117) + '...';
+		return first || fallback;
 	}
 
 	_toolDefsForTurn(ctx) {
