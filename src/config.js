@@ -136,5 +136,19 @@ module.exports = {
 	// tab. The agent's plan_board call returns IMMEDIATELY (its turn ends at
 	// the proposal); the user's Generate Board click later triggers the
 	// generation turn, so this only bounds how long an ignored picker lingers.
-	PLAN_PICK_TIMEOUT_MS: 30 * 60 * 1000
+	PLAN_PICK_TIMEOUT_MS: 30 * 60 * 1000,
+
+	// How many items of a confirmed board plan are rendered AT THE SAME TIME.
+	//
+	// Composing a component is the slow part of a batch, and it is the agent
+	// writing it out token by token - so one turn rendering ten items takes ten
+	// times as long as one item, however fast the machine is. MockFlow AI does not
+	// have this problem because its screens are separate model calls it fires
+	// together (genui's multipage phase 2), and this is the local equivalent: one
+	// agent process per item, this many at a time. Each is an independent CLI run
+	// billed to the user's own agent subscription, so the ceiling is deliberately
+	// modest - it is their machine, their rate limits and their laptop fan.
+	// MFBRIDGE_PLAN_CONCURRENCY=1 restores the old single sequential turn.
+	PLAN_CONCURRENCY: Math.max(1, Math.min(6,
+		parseInt(process.env.MFBRIDGE_PLAN_CONCURRENCY || '3', 10) || 3))
 };

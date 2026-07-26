@@ -291,6 +291,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | `MFBRIDGE_ALLOW_WRITE=1` | Allow the agent to write files and run shell commands |
 | `MFBRIDGE_CATALOG_URL` | Tool catalog endpoint override |
 | `MFBRIDGE_ALLOWED_ORIGINS` | Extra comma separated WebSocket origins |
+| `MFBRIDGE_PLAN_CONCURRENCY` | How many items of a board plan are drawn at once (default 3, max 6; `1` renders them one after another) |
 | `MFBRIDGE_DEV=1` | Dev mode (allow any WebSocket origin) |
 | `MFBRIDGE_DEBUG=1` | Print what each render produced (see Debugging) |
 
@@ -347,7 +348,9 @@ never interleave a draw.
   this edits it.
 - `plan_board`: propose a multi-part board. The list appears in the user's tab,
   the agent's turn ends there, and the user's Generate Board click generates and
-  arranges the chosen items.
+  arranges the chosen items. The items are drawn several at a time (one agent run
+  each, `MFBRIDGE_PLAN_CONCURRENCY` of them at once) and arranged in the order the
+  user confirmed, not the order they happen to finish.
 - `layout_board`: bento layout plus titled section wrap of the batch just drawn.
 - `read_board`: the live board (components, ids, labels, positions, sizes),
   including unsaved state.

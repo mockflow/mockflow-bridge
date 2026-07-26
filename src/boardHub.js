@@ -563,10 +563,16 @@ class BoardHub {
 		var conv = key ? this.convertContext.get(key) : null;
 		if (conv && gdata && gdata.data) gdata.data.fromconvert = conv;
 		const self = this;
+		const planIndex = this._claimPlanOrder(key, toolName);
 		return this.runOnBoard(projectid, { t: 'tool', toolName: toolName, gdata: gdata,
-			imageSlotForm: imageSlotForm || null, imagesAllowed: !!imagesAllowed })
+			imageSlotForm: imageSlotForm || null, imagesAllowed: !!imagesAllowed,
+			planIndex: planIndex })
 			.then(function(res) {
-				return self._notePlannedDraw(key).then(function(arranged) { return arranged || res; });
+				return self._notePlannedDraw(key, planIndex).then(function(arranged) { return arranged || res; });
+			}, function(err) {
+				// Nothing was drawn, so the item is still owed - the agent's retry takes it.
+				self._releasePlanOrder(key, planIndex);
+				throw err;
 			});
 	}
 
@@ -604,6 +610,10 @@ class BoardHub {
 					send: send || null,
 					toolByItem: (shape && shape.tools) || null,
 					imageByItem: (shape && shape.images) || null,
+					// Which items have already had their imagery answer handed out -
+					// needed only when two items share a tool and disagree about
+					// pictures (see plannedImageChoice).
+					claimed: {},
 					expires: Date.now() + config.PLAN_TIMEOUT_MS
 				});
 				self.log('[plan] armed "' + boardTitle + '" on board ' + key + ': ' + itemCount + ' item(s)'
@@ -750,19 +760,59 @@ class BoardHub {
 	 * board is done. Resolves null when no plan is active (the normal case).
 	 */
 	/**
+	 * Where this draw belongs in the plan the user confirmed, or undefined outside
+	 * a plan. The tab arranges the finished batch in this order.
+	 *
+	 * Needed because the items of a plan are rendered several at a time, so they
+	 * land in whatever order they finish - and a board whose screens are arranged
+	 * by which agent was quickest reads as scrambled. Each draw takes the first
+	 * item still unspoken-for that uses its tool, which is the same reasoning
+	 * plannedImageChoice uses and, like it, holds whatever the finishing order.
+	 */
+	_claimPlanOrder(key, toolName) {
+		const plan = key ? this.plans.get(key) : null;
+		if (!plan || !plan.toolByItem) return undefined;
+		if (!plan.ordered) plan.ordered = {};
+		for (var i = 0; i < plan.toolByItem.length; i++) {
+			if (plan.toolByItem[i] === toolName && !plan.ordered[i]) {
+				plan.ordered[i] = true;
+				return i;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Give an item's place back when its draw did NOT happen (the tab refused it,
+	 * the conversion failed). The agent's retry is the same planned item and must
+	 * be able to claim it again - otherwise the retry counts as an unplanned draw
+	 * and the plan never completes.
+	 */
+	_releasePlanOrder(key, planIndex) {
+		if (planIndex === undefined || planIndex === null) return;
+		const plan = key ? this.plans.get(key) : null;
+		if (plan && plan.ordered) delete plan.ordered[planIndex];
+	}
+
+	/**
 	 * The imagery answer for the draw about to happen, when a plan batch is armed.
 	 *
 	 * Imagery is answered per item on the plan card, so a batch holding two
 	 * image-capable components holds two answers; a single board-level flag would
-	 * give both whatever either one said. Draws land in plan order (the same
-	 * assumption the generation timeline already names each row from), so the item
-	 * being drawn is the one at the plan's cursor - `done` counts completed draws,
-	 * and this is called before the current one is counted.
+	 * give both whatever either one said. The draw names its TOOL, which is all
+	 * there is to go on, so the answer is read from the plan's items using this
+	 * tool:
 	 *
-	 * The cursor is TRUSTED ONLY when its tool matches the call. A retry after a
-	 * failed render, or an agent that reorders, would otherwise read the wrong
-	 * item's answer, so those fall back to the nearest undrawn item using this
-	 * tool. Returns undefined when there is no plan, which leaves the ordinary
+	 *  - they all say the same thing (the ordinary case, including every batch
+	 *    where a tool appears once): that answer, with no bookkeeping at all. Safe
+	 *    to ask twice, which a retry after a failed render does.
+	 *  - they disagree: each is handed out once, in plan order, so two items using
+	 *    one tool with different answers get their own. A further call once they
+	 *    are all spoken for (a retry) repeats the last one rather than inventing.
+	 *
+	 * Deliberately NOT keyed on how many draws have landed: items are rendered
+	 * several at a time, so "the nth draw is the nth item" stopped being true.
+	 * Returns undefined when there is no plan, which leaves the ordinary
 	 * board-level choice in charge.
 	 */
 	plannedImageChoice(projectid, toolName) {
@@ -772,23 +822,46 @@ class BoardHub {
 		}
 		const plan = key ? this.plans.get(key) : null;
 		if (!plan || !plan.imageByItem || !plan.toolByItem) return undefined;
-		const at = plan.done;
-		if (plan.toolByItem[at] === toolName) return !!plan.imageByItem[at];
-		for (var j = at + 1; j < plan.toolByItem.length; j++) {
-			if (plan.toolByItem[j] === toolName) return !!plan.imageByItem[j];
+
+		const mine = [];
+		for (var i = 0; i < plan.toolByItem.length; i++) {
+			if (plan.toolByItem[i] === toolName) mine.push(i);
 		}
-		for (var k = 0; k < plan.toolByItem.length; k++) {
-			if (plan.toolByItem[k] === toolName) return !!plan.imageByItem[k];
+		if (!mine.length) return undefined;
+
+		var uniform = true;
+		for (var u = 1; u < mine.length; u++) {
+			if (!!plan.imageByItem[mine[u]] !== !!plan.imageByItem[mine[0]]) { uniform = false; break; }
 		}
-		return undefined;
+		if (uniform) return !!plan.imageByItem[mine[0]];
+
+		if (!plan.claimed) plan.claimed = {};
+		for (var c = 0; c < mine.length; c++) {
+			if (!plan.claimed[mine[c]]) {
+				plan.claimed[mine[c]] = true;
+				return !!plan.imageByItem[mine[c]];
+			}
+		}
+		return !!plan.imageByItem[mine[mine.length - 1]];
 	}
 
-	_notePlannedDraw(key) {
+	_notePlannedDraw(key, planIndex) {
 		if (!key) return Promise.resolve(null);
 		const plan = this.plans.get(key);
 		if (!plan) return Promise.resolve(null);
 		if (Date.now() > plan.expires) {
 			this.plans.delete(key);
+			return Promise.resolve(null);
+		}
+		// A component the plan did not ask for: an agent that drew past its own item,
+		// or an unrelated draw landing mid-batch. It stays on the board, but counting
+		// it would finish the plan early - and the arrangement would then run while a
+		// real item was still being composed, leaving that one outside the section.
+		// Only when the plan knows its items by tool (_claimPlanOrder's own condition),
+		// so a plan without that shape counts every draw exactly as it always did.
+		if (plan.toolByItem && planIndex === undefined) {
+			this.log('[plan] an unplanned draw landed on board ' + key
+				+ ' - left on the board, not counted against the plan');
 			return Promise.resolve(null);
 		}
 		plan.remaining--;
@@ -841,6 +914,10 @@ class BoardHub {
 				+ 'Generate Board; your part ended when you proposed the plan.'));
 		}
 		const frame = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {}, imagesAllowed: !!imagesAllowed };
+		// A fill replaces a component that is already placed, so it has no place in
+		// a plan's arrangement (and must not take an item's slot in it).
+		const planIndex = fill ? undefined : this._claimPlanOrder(key, toolName);
+		if (!fill) frame.planIndex = planIndex;
 		if (fill) frame.fillTurnId = cap.turnId;
 		else if (cap) {
 			// A capture is armed but this tool is not one that fills from HTML, so this
@@ -862,12 +939,15 @@ class BoardHub {
 					self.clearCapture(key);
 					return res;
 				}
-				return self._notePlannedDraw(key).then(function(arranged) {
+				return self._notePlannedDraw(key, planIndex).then(function(arranged) {
 					// Keep the tab's conversion diagnostics on the result either way - the
 					// arranged branch replaces the payload and would otherwise drop them.
 					if (arranged && res && res.diagnostics) arranged.diagnostics = res.diagnostics;
 					return arranged || res;
 				});
+			}, function(err) {
+				self._releasePlanOrder(key, planIndex);   // see captureOrDraw
+				throw err;
 			});
 	}
 
@@ -897,14 +977,20 @@ class BoardHub {
 			args: spec.args || {},
 			tocomp: spec.tocomp || null,
 			promptPrefix: spec.promptPrefix || '',
-			extra: spec.extra || null
+			extra: spec.extra || null,
+			planIndex: undefined
 		};
+		const planIndex = this._claimPlanOrder(key, toolName);
+		frame.planIndex = planIndex;
 		const conv = key ? this.convertContext.get(key) : null;
 		if (conv) frame.fromconvert = conv;
 		const self = this;
 		return this.runOnBoard(projectid, frame)
 			.then(function(res) {
-				return self._notePlannedDraw(key).then(function(arranged) { return arranged || res; });
+				return self._notePlannedDraw(key, planIndex).then(function(arranged) { return arranged || res; });
+			}, function(err) {
+				self._releasePlanOrder(key, planIndex);   // see captureOrDraw
+				throw err;
 			});
 	}
 

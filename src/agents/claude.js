@@ -17,6 +17,8 @@ const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
 const BIN = 'claude';
 
+let writeSeq = 0;
+
 /**
  * The bridge's MCP endpoint, as a config file this CLI can be pointed at.
  *
@@ -38,7 +40,15 @@ function mcpConfigPath(projectid) {
 	const fileSuffix = projectid ? '-' + String(projectid).replace(/[^\w.-]/g, '_') : '';
 	const p = path.join(config.HOME_DIR, 'bridge-agent-mcp' + fileSuffix + '.json');
 	fs.mkdirSync(config.HOME_DIR, { recursive: true });
-	fs.writeFileSync(p, JSON.stringify(cfg, null, '\t'));
+	// Written through a temp file and renamed into place: turns on the SAME board
+	// share this path (the items of a board plan are rendered several at a time),
+	// and a plain write truncates first - so a turn starting up could read a file
+	// another turn was half way through writing and come up with no board tools.
+	// The content is identical either way; the rename is what makes it atomic.
+	const tmp = p + '.' + process.pid + '.' + (writeSeq++) + '.tmp';
+	fs.writeFileSync(tmp, JSON.stringify(cfg, null, '\t'));
+	try { fs.renameSync(tmp, p); }
+	catch (e) { fs.writeFileSync(p, JSON.stringify(cfg, null, '\t')); try { fs.unlinkSync(tmp); } catch (e2) {} }
 	return p;
 }
 

@@ -1516,10 +1516,26 @@ class AgentManager {
 	 * Run the plan_board continuation: the user clicked Generate Board, so
 	 * render the chosen items. Fired by boardHub.onPlanGenerate AFTER the
 	 * auto-arrange plan was armed - the proposing agent's turn ended at the
-	 * proposal, so a fresh headless turn does the rendering, driven entirely
+	 * proposal, so fresh headless turns do the rendering, driven entirely
 	 * by the plan's self-contained briefs (no conversation context needed).
 	 * Draws flow through the normal MCP loopback, get counted by the armed
 	 * plan, and the board arranges itself after the last item.
+	 *
+	 * SEVERAL ITEMS AT A TIME. Composing a component is the agent writing it out
+	 * token by token, so one turn rendering a whole plan costs the SUM of its
+	 * items - which is why a board that MockFlow AI produces in a minute took the
+	 * local agent many. MockFlow AI does not compose them one after another
+	 * either: its screens are separate model calls fired together (genui's
+	 * multipage phase). This is the local equivalent - one agent process per item,
+	 * config.PLAN_CONCURRENCY of them at once, so the batch costs about its
+	 * slowest item instead of all of them added up.
+	 *
+	 * What keeps the batch coherent: every turn is given the WHOLE plan and asked
+	 * for one item of it, so each item is composed knowing what it sits beside -
+	 * the briefs are the shared design system (plan_board requires it of them),
+	 * exactly as they were when one turn read the same list. Draws still land
+	 * through the hub's per-board queue, one at a time, in whatever order they
+	 * finish; the plan counts them and arranges the board after the last one.
 	 *
 	 * `sendToTab` streams the generation timeline back so Mida shows the same
 	 * loader the server multiboard turn shows: one step row per item while it is
@@ -1548,11 +1564,6 @@ class AgentManager {
 		const prevSelected = hub.selectedProjectId;
 		if (tab.projectid) hub.selectedProjectId = tab.projectid;
 
-		// Only the tools the plan actually uses.
-		const toolSet = {};
-		for (var i = 0; i < items.length; i++) toolSet['mcp__mockflow__' + items[i].tool] = true;
-		var allowed = Object.keys(toolSet).join(',');
-
 		// Imagery is answered per row on the plan card, so it is stated per item here.
 		// Without it a mixed batch reads as one instruction and every image-capable
 		// item gets pictures, including the ones the user left switched off.
@@ -1563,51 +1574,221 @@ class AgentManager {
 				img = perImages[i] ? ' [WITH images]' : ' [NO images]';
 			return (i + 1) + '. ' + (it.name || 'Item') + ' [tool: ' + it.tool + ']' + img + ': ' + (it.brief || '');
 		});
-		const prompt = 'The user confirmed this board plan - render it now.\n'
-			+ 'Board: "' + (plan.boardTitle || 'Board') + '"\nItems (render in this order):\n' + lines.join('\n');
 
-		var systemPrompt = 'You render the items of a board plan the user just confirmed on their live '
-			+ 'MockFlow board. Call each item\'s listed render tool exactly once, in order, with complete, '
-			+ 'well-formed data built from its brief. If several items are wireframe screens of one app, keep '
-			+ 'ONE shared design system and pass the SAME viewportWidth on every screen. The board arranges '
-			+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
-			+ 'the plan, do not chat, and never output a URL or a link.';
-
-		// The picker already asked about imagery, so this turn starts with the answers
+		// The picker already asked about imagery, so this batch starts with the answers
 		// in hand. askable:false is the important half - a batch must NEVER stop to
-		// ask, because ending the turn mid-plan abandons every item after the one that
-		// asked (and with them the auto-arrange). This opens the turn on the ANY-item
-		// answer, which is what the tool descriptions are built from; the per-item
-		// answers below, and the per-draw gate in mcpEndpoint, decide which items keep
-		// their slots.
-		systemPrompt += this._openImageTurn(hub, tab, { surface: 'mida', withImages: !!plan.withImages }, false);
+		// ask, because a turn that ends on a question renders nothing (and with it no
+		// auto-arrange). This opens the batch on the ANY-item answer, which is what the
+		// tool descriptions are built from; the per-item answers below, and the
+		// per-draw gate in mcpEndpoint, decide which items keep their slots.
+		//
+		// Set on the hub ONCE for the whole batch rather than per turn: it is one fact
+		// about one board, and the turns below all render on that board.
+		var imagery = this._openImageTurn(hub, tab, { surface: 'mida', withImages: !!plan.withImages }, false);
 
-		// The sentence above is one instruction for the turn, but the answers are per
+		// The sentence above is one instruction for a turn, but the answers are per
 		// item, so a batch where they differ needs saying explicitly. Only when they
 		// actually differ: on a uniform batch this would be noise contradicting nothing.
 		if (perImages && perImages.indexOf(true) !== -1 && perImages.indexOf(false) !== -1) {
-			systemPrompt += ' IMAGERY IS PER ITEM IN THIS BATCH, and the user chose it item by item: '
-				+ 'every item above is marked [WITH images] or [NO images]. Put image slots ONLY in the '
+			imagery += ' IMAGERY IS PER ITEM IN THIS BATCH, and the user chose it item by item: '
+				+ 'every item listed is marked [WITH images] or [NO images]. Put image slots ONLY in the '
 				+ 'items marked [WITH images], and compose the [NO images] ones to carry themselves with '
 				+ 'colour, type and shapes. Slots in an item the user did not ask for them in are dropped, '
 				+ 'so an item built around pictures it never receives arrives broken.';
 		}
 
-		// Same gate as the component path: when the plan contains a real-world /
-		// current-data component (catalog `webResearch`), let the agent ground the
-		// batch before drawing. Previously this path had no research affordance at
-		// all, so a planned table of live figures was drawn from training data.
-		if (this._toolWantsResearch(items.map(function(it) { return it.tool; }))) {
+		// One turn per item when there is room to run them side by side; one turn for
+		// the whole plan when there is not (PLAN_CONCURRENCY=1), which is what this
+		// did before and stays the fallback for a machine that cannot take the load.
+		const lanes = Math.max(1, Math.min(config.PLAN_CONCURRENCY, items.length));
+		const groups = (lanes > 1)
+			? items.map(function(_, i) { return [i]; })
+			: [items.map(function(_, i) { return i; })];
+
+		// This batch's processes. cancelPlanGenerate kills every one of them.
+		const procs = [];
+		this.planProcs.set(key, procs);
+
+		const ctx = {
+			tab: tab, plan: plan, hub: hub, send: send, key: key,
+			items: items, lines: lines, imagery: imagery,
+			perItem: lanes > 1, procs: procs
+		};
+
+		var startedSteps = 0;   // render calls actually begun, across every turn
+		var drawnItems = 0;     // ...that came back drawn (a retried call is one item)
+		var failedTurns = 0;
+		var crashedTurns = 0;   // died rather than ran to the end - a different message
+		var lastError = '';
+		var nextGroup = 0;
+		var running = 0;
+		var finishedTurns = 0;
+		// Wall clock against agent time: the two are equal when items render one
+		// after another and diverge by the number of lanes when they overlap, which
+		// is how the activity log SHOWS the batch ran in parallel rather than
+		// claiming it (see the closing line in finishBatch).
+		const batchStarted = Date.now();
+		var agentMs = 0;
+
+		// What the batch turns will actually be served: the hub value is what
+		// mcpEndpoint reads for every render in this batch, so if it disagrees with
+		// plan.withImages the answer was lost between the picker and here.
+		this.log('[plan] imagery for this batch: per item=' + JSON.stringify(perImages)
+			+ ' anyOn=' + !!plan.withImages
+			+ ' hub.getImageChoice=' + hub.getImageChoice(tab.projectid));
+		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
+			+ items.map(function(it) { return it.tool; }).join(', ') + '] - '
+			+ groups.length + ' turn(s), up to ' + lanes + ' at a time');
+
+		const finishBatch = function() {
+			self.planProcs.delete(key);
+			hub.selectedProjectId = prevSelected;
+			// Leftover plan count means an item never landed - drop the plan so it
+			// never re-arranges a later, unrelated batch.
+			hub.clearPlan(tab.projectid);
+			// This batch's image answer dies with it (see the chat path).
+			hub.setImageChoice(tab.projectid, undefined);
+
+			var ok = true;
+			var error = null;
+			if (startedSteps === 0 && crashedTurns > 0) {
+				ok = false;
+				error = 'The board could not be generated' + (lastError ? ' (' + lastError + ')' : '') + '.';
+			} else if (startedSteps === 0) {
+				// Every turn exited cleanly without ever calling a board tool. On Windows
+				// this is the tell-tale of a plan prompt that overflowed the cmd.exe
+				// command line and dropped --mcp-config. Report it instead of the phantom
+				// success the exit codes alone would imply.
+				ok = false;
+				error = 'The agent finished but none of the ' + items.length + ' planned components were drawn. '
+					+ 'If this is Windows with a large board plan, the plan may have exceeded the command-line '
+					+ 'limit - try fewer or smaller items, or update the bridge.';
+			} else if (drawnItems === 0) {
+				// Every render call came back refused. The turns themselves may have
+				// exited cleanly, so only the draw results say the board is empty.
+				ok = false;
+				error = 'The agent called the render tools but every component was refused, '
+					+ 'so nothing was drawn.';
+			} else if (failedTurns > 0) {
+				// Partially drawn: the items that did land are on the board and stay
+				// there, which is the whole reason each one runs on its own.
+				ok = false;
+				error = 'The local agent stopped before finishing ' + failedTurns + ' of '
+					+ groups.length + ' part(s) of the board'
+					+ (lastError ? ' (' + lastError + ')' : '') + '.';
+			}
+			const wallMs = Date.now() - batchStarted;
+			self.log('[plan] generate ' + (ok ? 'finished' : 'ended incomplete') + ' for "' + (tab.title || key)
+				+ '": ' + drawnItems + ' of ' + items.length + ' item(s) drawn from '
+				+ startedSteps + ' render call(s), ' + failedTurns + ' of ' + groups.length + ' turn(s) failed');
+			self.log('[plan] board took ' + (wallMs / 1000).toFixed(1) + 's; the ' + groups.length
+				+ ' agent run(s) spent ' + (agentMs / 1000).toFixed(1) + 's between them'
+				+ (wallMs > 0 ? ' (' + (agentMs / wallMs).toFixed(1) + 'x overlap - 1.0x means they ran one after another)' : ''));
+			send({ t: 'plan-done', ok: ok, error: error });
+		};
+
+		// Start turns until the lanes are full; each one that ends starts the next.
+		const pump = function() {
+			while (running < lanes && nextGroup < groups.length) {
+				const indices = groups[nextGroup];
+				const laneId = nextGroup;
+				nextGroup++;
+				running++;
+				// "now running" is the live count of agent processes on this board:
+				// it climbing above 1 is the batch overlapping, as it happens.
+				self.log('[plan] turn ' + (laneId + 1) + ' of ' + groups.length + ' started - '
+					+ running + ' agent run(s) now going at once');
+				self._runPlanTurn(ctx, indices, laneId, function(res) {
+					running--;
+					finishedTurns++;
+					startedSteps += res.started;
+					drawnItems += res.drawn || 0;
+					agentMs += res.ms || 0;
+					if (!res.ok) {
+						failedTurns++;
+						if (!res.clean) crashedTurns++;
+						if (res.error) lastError = res.error;
+					}
+					self.log('[plan] turn ' + (laneId + 1) + ' of ' + groups.length + ' ended after '
+						+ ((res.ms || 0) / 1000).toFixed(1) + 's - ' + running + ' still going');
+					if (finishedTurns === groups.length) finishBatch();
+					else pump();
+				});
+			}
+		};
+		pump();
+	}
+
+	/**
+	 * One turn of a confirmed plan: render the plan items at `indices` and call
+	 * `done({ ok, started, error })` when the process is gone. Several of these
+	 * run at once on the same board (see handlePlanGenerate), so everything here
+	 * is per turn - its own timeout, its own timeline rows, its own prompt file.
+	 */
+	_runPlanTurn(ctx, indices, laneId, done) {
+		const self = this;
+		const key = ctx.key;
+		const tab = ctx.tab;
+		const send = ctx.send;
+		const mine = indices.map(function(i) { return ctx.items[i]; });
+
+		// Only the tools this turn's items actually use.
+		const toolSet = {};
+		for (var i = 0; i < mine.length; i++) toolSet['mcp__mockflow__' + mine[i].tool] = true;
+		var allowed = Object.keys(toolSet).join(',');
+
+		var prompt, systemPrompt;
+		if (ctx.perItem) {
+			// The whole plan is quoted for context and ONE item asked for. An item
+			// composed without the rest of the list in front of it is an item that
+			// does not know what it has to match.
+			prompt = 'The user confirmed this board plan, and it is being rendered right now - one item per '
+				+ 'agent, several at the same time.\nBoard: "' + (ctx.plan.boardTitle || 'Board') + '"\n'
+				+ 'The whole plan, so that what you draw matches the rest of it:\n' + ctx.lines.join('\n')
+				+ '\n\nRENDER THIS ONE ITEM ONLY - the others are being drawn by other agents as you work:\n'
+				+ ctx.lines[indices[0]];
+			systemPrompt = 'You render ONE item of a board plan the user just confirmed on their live '
+				+ 'MockFlow board. The rest of the plan is quoted for context only: other agents are '
+				+ 'rendering those items at this moment, so drawing one of them would put it on the board '
+				+ 'twice. Call your item\'s listed render tool exactly once, with complete, well-formed data '
+				+ 'built from its brief. What makes the board look like one piece of work is the plan itself: '
+				+ 'follow the design system, palette and viewport the briefs state, exactly as written - if '
+				+ 'the items are wireframe screens of one app, every screen takes the SAME viewportWidth. '
+				+ 'The board arranges itself once every item has landed - do not call plan_board or '
+				+ 'layout_board, do not draw anything beyond your own item, do not chat, and never output a '
+				+ 'URL or a link.';
+		} else {
+			prompt = 'The user confirmed this board plan - render it now.\n'
+				+ 'Board: "' + (ctx.plan.boardTitle || 'Board') + '"\nItems (render in this order):\n'
+				+ ctx.lines.join('\n');
+			systemPrompt = 'You render the items of a board plan the user just confirmed on their live '
+				+ 'MockFlow board. Call each item\'s listed render tool exactly once, in order, with complete, '
+				+ 'well-formed data built from its brief. If several items are wireframe screens of one app, keep '
+				+ 'ONE shared design system and pass the SAME viewportWidth on every screen. The board arranges '
+				+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
+				+ 'the plan, do not chat, and never output a URL or a link.';
+		}
+
+		systemPrompt += ctx.imagery;
+
+		// Same gate as the component path: when this turn's items include a real-world /
+		// current-data component (catalog `webResearch`), let the agent ground them
+		// before drawing. Without it a planned table of live figures is drawn from
+		// training data.
+		if (this._toolWantsResearch(mine.map(function(it) { return it.tool; }))) {
 			allowed += ',WebSearch,WebFetch';
 			systemPrompt += RESEARCH_GUIDANCE
-				+ ' Always finish by rendering every planned item.';
+				+ (ctx.perItem ? ' Always finish by rendering your item.'
+					: ' Always finish by rendering every planned item.');
 		}
 
 		// partialMessages: announces each render tool the moment the model starts
 		// writing it, so the step row appears immediately instead of after thousands
 		// of characters of HTML have streamed out (same reason the chat turn uses it).
 		const ws = this._effectiveWorkspace(tab);
-		const delivery = this._deliverPrompt(prompt, key);
+		// Per turn, not per board: turns of one batch run together, and a shared name
+		// would have them overwriting each other's staged prompt (Windows path).
+		const delivery = this._deliverPrompt(prompt, key + '-p' + laneId);
 		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
 			projectid: tab.projectid,
@@ -1618,14 +1799,8 @@ class AgentManager {
 			partialMessages: true
 		}, delivery));
 
-		// What the batch turn will actually be served: the hub value is what
-		// mcpEndpoint reads for every render in this turn, so if it disagrees with
-		// plan.withImages the answer was lost between the picker and here.
-		this.log('[plan] imagery for this batch: per item=' + JSON.stringify(perImages)
-			+ ' anyOn=' + !!plan.withImages
-			+ ' hub.getImageChoice=' + hub.getImageChoice(tab.projectid));
-		this.log('[plan] generate starting: ' + items.length + ' item(s) for "' + (tab.title || key) + '" ['
-			+ items.map(function(it) { return it.tool; }).join(', ') + ']'
+		this.log('[plan] turn ' + (laneId + 1) + ' starting: ' + mine.length + ' item(s) ['
+			+ mine.map(function(it) { return it.tool; }).join(', ') + ']'
 			+ (delivery.file ? ' (prompt via file)' : delivery.stdin != null ? ' (prompt via stdin)' : ''));
 
 		var proc;
@@ -1635,35 +1810,41 @@ class AgentManager {
 				cwd: ws
 			});
 		} catch (err) {
-			this.log('[plan] generate launch failed: ' + err.message);
-			hub.clearPlan(tab.projectid);
-			hub.selectedProjectId = prevSelected;
-			send({ t: 'plan-done', ok: false, error: 'Could not launch the local agent: ' + err.message });
+			this.log('[plan] turn ' + (laneId + 1) + ' launch failed: ' + err.message);
+			// Asynchronously, so the caller's own loop is never re-entered mid-spawn.
+			setImmediate(function() {
+				done({ ok: false, started: 0, drawn: 0, ms: 0,
+					error: 'could not launch the local agent: ' + err.message });
+			});
 			return;
 		}
-		this.planProcs.set(key, proc);
+		ctx.procs.push(proc);
+		const turnStarted = Date.now();
 
-		// Timeline rows for the generation turn. Same step contract as the chat turn
+		// Timeline rows for this turn. Same step contract as the chat turn
 		// (renderTimelineStep in the tab), so the local batch renders with the same
 		// spinner/check rows the server multiboard turn renders.
 		var openSteps = {};
-		var stepCounter = 0;
+		var stepCounter = 0;   // render calls the agent BEGAN (a retry is a second one)
+		var drawnSteps = 0;    // ...of which came back drawn
+		var failedSteps = 0;   // ...and came back refused (bad arguments, tab error)
 		var itemCursor = 0;
 		var buf = '';
 		// When the prompt was delivered as a file (Windows large-plan path), the agent's
 		// first tool call is the read that fetches it - not a rendered item. Skip that one
-		// call so it neither steals item[0]'s timeline row nor counts toward stepCounter.
+		// call so it neither steals the first item's timeline row nor counts as a render.
 		var deliveryTool = (delivery.file && delivery.file.tool) || null;
 		var skipIds = {};
 		var pendingDeliveryRead = !!deliveryTool;
 
 		function startStep(toolId, toolName) {
-			var id = toolId || ('pl_' + key + '_' + stepCounter);
+			var id = toolId || ('pl_' + key + '_' + laneId + '_' + stepCounter);
 			if (openSteps[id]) return;
-			var stepId = 'pl_' + key + '_' + (stepCounter++);
-			// Tools fire in plan order, so the nth call names the nth item - that is
-			// what puts the item name on the row, like the server's "Creating <name>".
-			var item = items[itemCursor++] || null;
+			var stepId = 'pl_' + key + '_' + laneId + '_' + (stepCounter++);
+			// A turn's items are rendered in the order it was given them, so its nth
+			// call names its nth item - that is what puts the item name on the row,
+			// like the server's "Creating <name>". With one item per turn it is exact.
+			var item = mine[itemCursor++] || null;
 			openSteps[id] = { stepId: stepId, started: Date.now(), name: item && item.name };
 			self.log('[plan] step start: ' + toolName + (item && item.name ? ' -> "' + item.name + '"' : ''));
 			send({
@@ -1692,6 +1873,7 @@ class AgentManager {
 					var open = openSteps[ev.id];
 					if (!open) continue;
 					delete openSteps[ev.id];
+					if (ev.ok) drawnSteps++; else failedSteps++;
 					self.log('[plan] step end: "' + (open.name || open.stepId) + '" '
 						+ (ev.ok ? 'ok' : 'FAILED') + ' in ' + (Date.now() - open.started) + 'ms');
 					send({
@@ -1714,54 +1896,64 @@ class AgentManager {
 		var stderrTail = '';
 		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
 
-		// Backstop: a hung continuation never pins the board's plan forever.
+		// Backstop: a hung turn never pins the board's plan forever.
 		const killer = setTimeout(function() {
-			self.log('[plan] generate timed out after ' + config.PLAN_TIMEOUT_MS + 'ms - killing the agent');
+			self.log('[plan] turn ' + (laneId + 1) + ' timed out after ' + config.PLAN_TIMEOUT_MS + 'ms - killing the agent');
 			killProcTree(proc);
 		}, config.PLAN_TIMEOUT_MS);
 
-		const done = function(what, ok, error) {
+		var settled = false;
+		// `clean` = the agent ran to the end and exited 0. A turn can be clean and
+		// still have drawn nothing, which is a different failure from a crash and
+		// gets a different message from the caller.
+		const finish = function(what, ok, clean, error) {
+			if (settled) return;
+			settled = true;
 			clearTimeout(killer);
-			self.planProcs.delete(key);
-			hub.selectedProjectId = prevSelected;
-			// Leftover plan count means the agent died mid-batch - drop it so the
-			// stale plan never re-arranges a later, unrelated batch.
-			hub.clearPlan(tab.projectid);
-			// This batch's image answer dies with it (see the chat path).
-			hub.setImageChoice(tab.projectid, undefined);
+			var at = ctx.procs.indexOf(proc);
+			if (at !== -1) ctx.procs.splice(at, 1);
 			// Close any dangling rows so the tab's timeline never spins forever.
 			for (var k in openSteps) {
 				send({ t: 'plan-step', step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
 			}
-			self.log('[plan] generate ' + what + ' for "' + (tab.title || key) + '": '
-				+ stepCounter + ' of ' + items.length + ' item(s) started'
+			// Calls and components are different numbers: a render the agent had to
+			// call twice (bad arguments the first time, a tab error) is one component
+			// off two calls, and reading the call count as components is what made a
+			// one-item turn report "2 of 1".
+			self.log('[plan] turn ' + (laneId + 1) + ' ' + what + ': ' + drawnSteps + ' of ' + mine.length
+				+ ' item(s) drawn'
+				+ (stepCounter !== drawnSteps
+					? ' (' + stepCounter + ' render call(s), ' + failedSteps + ' refused)' : '')
 				+ (!ok && lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : ''));
-			send({ t: 'plan-done', ok: ok, error: error || null });
-		};
-		proc.on('error', function(err) { done('failed to run', false, 'Local agent error: ' + (err && err.message)); });
-		proc.on('close', function(code) {
-			if (code === 0 && stepCounter === 0) {
-				// Exited cleanly but rendered nothing: the agent ran without ever calling a
-				// board tool. On Windows this is the tell-tale of a plan prompt that overflowed
-				// the cmd.exe command line and dropped --mcp-config. Report it instead of the
-				// phantom success the exit code alone would imply.
-				done('finished without drawing anything', false,
-					'The agent finished but none of the ' + items.length + ' planned components were drawn. '
-					+ 'If this is Windows with a large board plan, the plan may have exceeded the command-line '
-					+ 'limit - try fewer or smaller items, or update the bridge.');
-			} else if (code === 0) {
-				done('finished', true, null);
-			} else {
-				done('exited ' + code, false, 'The local agent stopped before finishing the board'
-					+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
+			// More components than the turn was asked for: the agent drew past its own
+			// item. The board keeps them (they are real components the user can delete),
+			// but the plan does not count them - see boardHub._notePlannedDraw.
+			if (drawnSteps > mine.length) {
+				self.log('[plan] turn ' + (laneId + 1) + ' drew ' + drawnSteps + ' components for '
+					+ mine.length + ' planned item(s) - the extra one(s) are not part of the plan');
 			}
+			done({ ok: ok, clean: clean, started: stepCounter, drawn: drawnSteps,
+				ms: Date.now() - turnStarted, error: error || null });
+		};
+
+		proc.on('error', function(err) { finish('failed to run', false, false, 'local agent error: ' + (err && err.message)); });
+		proc.on('close', function(code) {
+			// Nothing drawn is a failure however clean the exit: the caller turns a
+			// batch that drew nothing at all into the command-line-limit message.
+			if (code === 0 && stepCounter > 0) return finish('finished', true, true, null);
+			if (code === 0) return finish('finished without drawing anything', false, true, null);
+			finish('exited ' + code, false, false, lastErrorLine(stderrTail, 160) || null);
 		});
 	}
 
 	cancelPlanGenerate(tab) {
 		const key = tab.projectid || tab.id;
-		const proc = this.planProcs.get(key);
-		if (proc) killProcTree(proc);
+		const procs = this.planProcs.get(key);
+		if (!procs) return;
+		// One batch is several processes now; a cancel that killed only the first
+		// would leave the rest still drawing on a board the user has cancelled.
+		const list = Array.isArray(procs) ? procs.slice() : [procs];
+		for (var i = 0; i < list.length; i++) killProcTree(list[i]);
 	}
 
 	cancelCompGen(tab) {
