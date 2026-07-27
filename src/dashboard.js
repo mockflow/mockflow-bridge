@@ -417,8 +417,14 @@ function dash(W, H) {
 	for (var i = 0; i < rows; i++) {
 		out.push(' ' + padEnd(L[i] || '', half - 2) + '  ' + (R[i] || ''));
 	}
-	// files chip
-	if (s.paired && s.agentOK) out.push(' ' + C.dim('◦ Files off') + C.dim(' — press d to allow one folder'));
+	// files chip — reflects the workspace the bridge actually started with, so a
+	// run with --workspace never reads as "off" here while the details panel (d)
+	// shows the folder.
+	if (s.paired && s.agentOK) {
+		out.push(agents.hasWorkspace
+			? ' ' + C.dim('◦ Files ') + C.white(ui.shortenPath(agents.workspace)) + C.dim(' — read locally, never uploaded')
+			: ' ' + C.dim('◦ Files off') + C.dim(' — restart with --workspace <folder> to allow one folder'));
+	}
 
 	// alert strips (update at the TOP of the alert stack)
 	out.push('');

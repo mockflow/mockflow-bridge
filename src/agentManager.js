@@ -99,6 +99,14 @@ function bareToolName(toolName) {
 const SILENT_TOOLS = { declare_render: true };
 
 /**
+ * How long a tool outside a turn's allowlist runs before it earns a timeline row.
+ * A denied tool answers in milliseconds, so nothing is shown for it; one the
+ * agent's own settings permit really runs, and past this the board needs a loader
+ * rather than an empty pause. See startStep.
+ */
+const DEFER_STEP_MS = 800;
+
+/**
  * Human label for a tool's timeline row. "lite" is an internal product suffix,
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
  */
@@ -773,6 +781,15 @@ class AgentManager {
 				+ 'them to restart the bridge with --workspace <path> to enable it, and reassure them their '
 				+ 'files are never uploaded: only what you draw is sent to MockFlow, and the reading and '
 				+ 'thinking happen on their own machine.';
+		} else if (this._workspaceEnabled(tab)) {
+			// The turn already RUNS in the workspace, but nothing said so: without this
+			// the agent treats "my project" / "this folder" as words in a prompt and
+			// draws from imagination instead of reading what is actually there.
+			systemPrompt += ' The user has given you one folder to read: ' + ws + '. It is also your '
+				+ 'working directory. When the request refers to their files, code, repo, docs, designs '
+				+ 'or says "this folder", "my project" or similar, read that folder first (Read/Grep/Glob) '
+				+ 'and base what you draw on what is really in it, rather than assuming or asking them to '
+				+ 'paste it. Their files stay on their machine: only what you draw is sent to MockFlow.';
 		}
 
 		// A file the user attached in Mida. It arrived over the localhost socket
@@ -840,6 +857,12 @@ class AgentManager {
 
 		var replyText = '';
 		var openSteps = {};
+		// Rows for tools outside this turn's allowlist, held back for DEFER_STEP_MS
+		// before they open - see startStep. `turnEnded` closes the window: a line
+		// parsed after finish() must not arm a timer that opens a row on a turn the
+		// tab has already closed.
+		var pendingSteps = {};
+		var turnEnded = false;
 		var stepCounter = 0;
 		// Both steps of a decide-then-draw turn report into the SAME tab turn, and the
 		// drawing step is a fresh process whose counter starts at 0 again - so the phase
@@ -851,18 +874,39 @@ class AgentManager {
 		// tool_use id: the partial stream announces the tool BEFORE its input is
 		// written, and the finished assistant message repeats it afterwards.
 		function startStep(toolId, toolName) {
-			// A tool outside this turn's allowlist is denied by the agent, so a row
-			// for it would only ever resolve as a red failure. Keep those out of the
-			// board's timeline: the user cares about work that can happen, not about
-			// the agent probing its own toolbox.
-			if (!self._isRunnableTool(toolName, allowedTools)) return;
 			// Bookkeeping, not work - see SILENT_TOOLS. A row here would be the first
 			// thing the turn shows and would read as a drawing step that has not started.
 			if (SILENT_TOOLS[bareToolName(toolName)]) return;
 			var id = toolId || (stepIdBase + stepCounter);
-			if (openSteps[id]) return;
+			if (openSteps[id] || pendingSteps[id]) return;
+			// A tool outside this turn's allowlist MAY be denied, and a row for a denial
+			// would only ever resolve as a red failure - the user cares about work that
+			// can happen, not about the agent probing its own toolbox. But the allowlist
+			// is ADDITIVE, not exclusive: the agent's own settings can permit a tool this
+			// turn did not ask for (Bash, to `ls` the workspace before reading it), and
+			// then it really runs and really takes time. Dropping its row outright left
+			// the board with no loader at all for that whole stretch, right after the
+			// agent said it was going to look at the files.
+			// So the row is deferred rather than dropped: a denial answers in
+			// milliseconds and cancels it (see tool-end), while a tool still running past
+			// the delay opens its row and the board keeps a loader for the real wait.
+			var startedAt = Date.now();
+			if (!self._isRunnableTool(toolName, allowedTools)) {
+				if (turnEnded) return;
+				pendingSteps[id] = setTimeout(function() {
+					delete pendingSteps[id];
+					if (turnEnded) return;
+					openStep(id, toolName, startedAt);
+				}, DEFER_STEP_MS);
+				return;
+			}
+			openStep(id, toolName, startedAt);
+		}
+
+		/** Emit the start row for a tool, timed from when the agent announced it. */
+		function openStep(id, toolName, startedAt) {
 			var stepId = stepIdBase + (stepCounter++);
-			openSteps[id] = { stepId: stepId, started: Date.now() };
+			openSteps[id] = { stepId: stepId, started: startedAt || Date.now() };
 			var label = toolStepLabel(toolName);
 			sendToTab({
 				t: 'chat-step', id: turnId,
@@ -906,6 +950,12 @@ class AgentManager {
 				} else if (ev.type === 'tool-start') {
 					startStep(ev.id, ev.name);
 				} else if (ev.type === 'tool-end') {
+					// Answered before its row was due: a denial, or a tool that took no
+					// time worth showing. Either way nothing is opened - see startStep.
+					if (pendingSteps[ev.id]) {
+						clearTimeout(pendingSteps[ev.id]);
+						delete pendingSteps[ev.id];
+					}
 					var open = openSteps[ev.id];
 					if (open) {
 						delete openSteps[ev.id];
@@ -965,6 +1015,11 @@ class AgentManager {
 			// steps of a decide-then-draw turn are one turn. Left behind, they would be
 			// judged against a later turn that has words of its own - or none.
 			if (!handingOver) hub.setTurnRequest(tab.projectid, '');
+			// A deferred row must not open after the turn is over, or the timeline
+			// grows a spinner nothing will ever resolve.
+			turnEnded = true;
+			for (var pk in pendingSteps) clearTimeout(pendingSteps[pk]);
+			pendingSteps = {};
 			// Close any dangling step rows so the timeline never spins forever.
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
