@@ -79,13 +79,31 @@ const RESEARCH_GUIDANCE =
 	+ 'unknown specifics as neutral placeholders rather than inventing them.';
 
 /**
+ * A tool's name without the per-CLI MCP prefix: mcp__mockflow__render_flowchart
+ * (Claude Code), mockflow_render_flowchart (opencode), bare (Codex).
+ */
+function bareToolName(toolName) {
+	return String(toolName || '').replace(/^mcp__mockflow__|^mockflow[_.]/, '');
+}
+
+/**
+ * Tools that do bookkeeping rather than work, and so never get a timeline row.
+ *
+ * declare_render is the deciding step naming what it is about to draw. It is an
+ * internal handshake between the two steps of one turn - nothing is drawn, and
+ * nothing the user asked for has happened yet. Shown, it opens a row reading
+ * "declare render" BEFORE the turn has said a word (the deciding step's text is
+ * deliberately held), so the board announces a drawing step that is really the
+ * turn still making up its mind, and the reply that follows lands underneath it.
+ */
+const SILENT_TOOLS = { declare_render: true };
+
+/**
  * Human label for a tool's timeline row. "lite" is an internal product suffix,
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
  */
 function toolStepLabel(toolName) {
-	// Each CLI prefixes MCP tools its own way: mcp__mockflow__render_flowchart
-	// (Claude Code), mockflow_render_flowchart (opencode), bare (Codex).
-	return String(toolName || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
+	return bareToolName(toolName || 'tool')
 		.replace(/^render_/, 'Drawing ').replace(/_/g, ' ').replace(/lite$/, '');
 }
 
@@ -838,6 +856,9 @@ class AgentManager {
 			// board's timeline: the user cares about work that can happen, not about
 			// the agent probing its own toolbox.
 			if (!self._isRunnableTool(toolName, allowedTools)) return;
+			// Bookkeeping, not work - see SILENT_TOOLS. A row here would be the first
+			// thing the turn shows and would read as a drawing step that has not started.
+			if (SILENT_TOOLS[bareToolName(toolName)]) return;
 			var id = toolId || (stepIdBase + stepCounter);
 			if (openSteps[id]) return;
 			var stepId = stepIdBase + (stepCounter++);
