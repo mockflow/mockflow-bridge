@@ -238,7 +238,17 @@ class BoardHub {
 					this._send(ws, { t: 'paired', token: token });
 					this.log('Tab paired (' + (tab.origin || 'unknown origin') + ')');
 				} else {
-					this._send(ws, { t: 'error', message: 'Wrong pairing code' });
+					// Says what to do about it, because this text is what the editor
+					// puts in front of the user. A restarted bridge prints a new code,
+					// which is the usual reason a code that worked before stops working.
+					this._send(ws, {
+						t: 'error',
+						message: 'That pairing code is not correct. Enter the 6 digit code currently shown in your bridge terminal.'
+					});
+					// Also on the terminal, so the code on screen is the obvious next
+					// thing to look at.
+					this.log('Wrong pairing code from a board (' + (tab.origin || 'unknown origin')
+						+ '). The code to use is ' + this.pairingCode + '.');
 				}
 				return;
 
