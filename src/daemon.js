@@ -80,7 +80,7 @@ async function start(opts) {
 	// Decide-then-draw: the agent said what it will draw, then (once any question
 	// is answered) the drawing step of that same chat turn runs.
 	hub.onDeclared = function(projectid, tool, held) { agents.noteDeclared(projectid, tool, held); };
-	hub.onCompose = function(projectid) { agents.resumeCompose(projectid); };
+	hub.onCompose = function(projectid, cancelled) { agents.resumeCompose(projectid, cancelled); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly
 	// (only offer "brainstorm your files" when a workspace is actually set).

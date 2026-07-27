@@ -465,7 +465,9 @@ class McpEndpoint {
 						this.hub.askImages(board, {
 							toolName: declared, label: dLabel,
 							kind: dEntry.mediaComponent ? 'component' : 'slots'
-						}).then(function() { self4.hub.requestCompose(board); })
+						// null = the user cancelled the question rather than answering it,
+						// so the drawing step never runs and the held turn is closed.
+						}).then(function(on) { self4.hub.requestCompose(board, on === null); })
 						  .catch(function() { self4.hub.requestCompose(board); });
 						return this._ok('Noted: a ' + dLabel + '. ' + heldNote + 'The user is being asked whether it '
 							+ 'should include AI-generated images, and the drawing step starts by itself as soon as '
@@ -846,6 +848,13 @@ class McpEndpoint {
 	 *           exactly what it sent, plus this tool's slot instructions.
 	 */
 	_afterImageAnswer(board, pending, on) {
+		// Not an answer at all: the user cancelled the question (askImages resolves
+		// null for that). A no still draws a slots component without its pictures,
+		// which is exactly what they declined - so nothing happens here.
+		if (on !== true && on !== false) {
+			this.log('[images] the ' + pending.label + ' was cancelled - nothing drawn');
+			return;
+		}
 		// A media component IS the asset: yes generates it from the prompt the agent
 		// already wrote (no agent re-runs), no means nothing is created.
 		if (pending.kind === 'component') {

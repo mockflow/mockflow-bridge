@@ -1074,9 +1074,13 @@ class BoardHub {
 	 * The declare step is finished with (the user has answered, or there was
 	 * nothing to ask): run the drawing step of the same chat turn. Wired to the
 	 * agent manager by the daemon, like onPlanGenerate.
+	 *
+	 * `cancelled` says the user backed out at the imagery question instead of
+	 * answering it, so there is no drawing step: the held turn is closed rather
+	 * than continued.
 	 */
-	requestCompose(projectid) {
-		if (this.onCompose) this.onCompose(projectid || null);
+	requestCompose(projectid, cancelled) {
+		if (this.onCompose) this.onCompose(projectid || null, !!cancelled);
 	}
 
 	/**
@@ -1181,6 +1185,18 @@ class BoardHub {
 			surface: (key && this.turnSurfaces.get(key)) || 'mida'
 		}, config.PLAN_PICK_TIMEOUT_MS)
 			.then(function(res) {
+				// The user dropped the question instead of answering it (the card's
+				// Cancel) - they want none of this drawn. Resolved as null, NOT false:
+				// false is a real answer that still draws the component without its
+				// pictures. Nothing is remembered either, because there is no longer a
+				// turn for it to belong to - and imageAsks in particular, which
+				// setImageChoice normally clears, would otherwise answer the NEXT turn
+				// on this board from this cancelled question.
+				if (res && res.cancelled) {
+					self.log('[images] ask cancelled by the user - nothing is drawn');
+					if (key) { self.imageChoices.delete(key); self.imageAsks.delete(key); }
+					return null;
+				}
 				const on = !!(res && res.withImages);
 				self.log('[images] user chose ' + (on ? 'WITH' : 'without') + ' images for this turn');
 				if (key) self.imageChoices.set(key, on);

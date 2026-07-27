@@ -988,6 +988,15 @@ class AgentManager {
 			}
 			if (ph && ph.declared && ok) {
 				ph.phase1Done = true;
+				// Cancelled while this step was still exiting (the imagery question is
+				// asked from inside its declare_render call, so that is the common way
+				// to answer it). handingOver stayed true all the way through here, so
+				// the preamble this step was holding is dropped as designed instead of
+				// being written into the chat as the answer to a cancelled turn.
+				if (ph.cancelled) {
+					self.log('[declare] cancelled at the imagery question - nothing is drawn');
+					return self._endCancelledPhase(key);
+				}
 				self.log('[declare] deciding step finished, waiting to draw');
 				if (ph.composeReady) self._runComposePhase(key);
 				return;
@@ -1023,13 +1032,8 @@ class AgentManager {
 		});
 		// A turn waiting between its deciding and drawing steps has no process to
 		// kill, and its tab turn is deliberately still open - close it here or the
-		// chat waits for a draw that is never coming.
-		const ph = this.chatPhases.get(boardKey);
-		if (ph) {
-			this.chatPhases.delete(boardKey);
-			if (ph.hub && ph.hub.setTurnRequest) ph.hub.setTurnRequest(tab.projectid, '');
-			try { ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: true, text: '' }); } catch (e) {}
-		}
+		// chat waits for a draw that is never coming. A no-op when there is none.
+		this._endCancelledPhase(boardKey);
 	}
 
 	/**
@@ -1404,12 +1408,41 @@ class AgentManager {
 	 * safe to call before the deciding step's process has exited - whichever
 	 * happens second starts the draw.
 	 */
-	resumeCompose(projectid) {
+	resumeCompose(projectid, cancelled) {
 		const key = this._chatPhaseKey(projectid);
 		const ph = key && this.chatPhases.get(key);
 		if (!ph) return;
+		// The user backed out at the imagery question rather than answering it, so
+		// there is no drawing step to run. Marked rather than torn down here: the
+		// deciding step's process is usually still exiting (the question is asked
+		// from inside its declare_render call), and its finish() must still see a
+		// live phase record or it flushes the preamble it is holding.
+		if (cancelled) {
+			ph.cancelled = true;
+			if (ph.phase1Done) this._endCancelledPhase(key);
+			return;
+		}
 		ph.composeReady = true;
 		if (ph.phase1Done) this._runComposePhase(key);
+	}
+
+	/**
+	 * Close a held chat turn that is never going to draw - the user cancelled at
+	 * the imagery question, or cancelled the turn outright.
+	 *
+	 * The deciding step handed the turn over, so it deliberately left the user's
+	 * words and the turn's image answer in place for the drawing step; with no
+	 * drawing step coming, they are cleared here or the next turn on this board
+	 * inherits them.
+	 */
+	_endCancelledPhase(key) {
+		const ph = this.chatPhases.get(key);
+		if (!ph) return;
+		this.chatPhases.delete(key);
+		const projectid = ph.tab && ph.tab.projectid;
+		if (ph.hub && ph.hub.setTurnRequest) ph.hub.setTurnRequest(projectid, '');
+		if (ph.hub && ph.hub.setImageChoice) ph.hub.setImageChoice(projectid, undefined);
+		try { ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: true, text: '' }); } catch (e) {}
 	}
 
 	/**
