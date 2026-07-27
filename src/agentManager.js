@@ -1682,6 +1682,20 @@ class AgentManager {
 		// about one board, and the turns below all render on that board.
 		var imagery = this._openImageTurn(hub, tab, { surface: 'mida', withImages: !!plan.withImages }, false);
 
+		// The items of this batch are written by agents that cannot see each other,
+		// so anything appearing on more than one of them has to be identified rather
+		// than described - two writers never arrive at the same sentence, but they do
+		// arrive at the same name. The tool descriptions carry the naming rules; this
+		// says the batch is one product, which is what makes the rules apply across it.
+		if (items.length > 1) {
+			imagery += ' THE ITEMS BELOW ARE ONE PRODUCT, drawn side by side by different agents. Any picture'
+				+ ' that belongs to the product rather than to a single item - its brand mark, a person named'
+				+ ' anywhere in the plan, anything the briefs mention more than once - must be NAMED with the'
+				+ ' shared-asset key its tool documents, using the documented naming rules so the other agents'
+				+ ' land on the same name for the same thing without seeing what you wrote. Named once, it is'
+				+ ' made once and every item that names it shows that same picture.';
+		}
+
 		// The sentence above is one instruction for a turn, but the answers are per
 		// item, so a batch where they differ needs saying explicitly. Only when they
 		// actually differ: on a uniform batch this would be noise contradicting nothing.
@@ -1812,6 +1826,18 @@ class AgentManager {
 				});
 			}
 		};
+
+		// Phase 1 before Phase 2, exactly as the server's multi-screen flow orders
+		// them: nothing is written until the items know what they share. One item
+		// shares nothing with anything, so it starts straight away.
+		if (items.length > 1) {
+			this.log('[plan] settling what the items share before drawing any of them');
+			this._planSharedFacts(tab, lines, function(facts) {
+				if (facts) ctx.shared = facts;
+				pump();
+			});
+			return;
+		}
 		pump();
 	}
 
@@ -1821,6 +1847,96 @@ class AgentManager {
 	 * run at once on the same board (see handlePlanGenerate), so everything here
 	 * is per turn - its own timeout, its own timeline rows, its own prompt file.
 	 */
+	/**
+	 * Phase 1 of a board plan: settle what the items SHARE, before any of them is
+	 * written.
+	 *
+	 * The server's own multi-screen flow does exactly this (genuiwireframelite
+	 * generateDesignSystem): one call decides the product's identity and a registry
+	 * of the pictures its screens will reuse, and every screen is then handed that
+	 * result verbatim. It is not an optimisation - it is the only thing that makes
+	 * separate writers agree. Left to themselves they do not converge: one lane
+	 * called the product "Relayta CRM" and named its mark "crm-logo" while another
+	 * called it "CRM Suite" and named the same mark "app-logo", and two screens that
+	 * disagree about whose logo it is cannot share one.
+	 *
+	 * No render tools and no board access: this step only writes down facts.
+	 * Anything that goes wrong leaves the batch exactly as it was before - the
+	 * items are still drawn, just without a shared registry.
+	 */
+	_planSharedFacts(tab, lines, done) {
+		const self = this;
+		const prompt = 'These items are about to be drawn as one product, each by a different agent that '
+			+ 'cannot see the others. Before they start, settle what they SHARE.\nItems:\n' + lines.join('\n')
+			+ '\n\nReply with JSON and nothing else:\n'
+			+ '{"productName":"...","brandNote":"...","sharedAssets":{"<key>":{"prompt":"...","width":0,"height":0}}}\n'
+			+ '- productName: the one name every item uses for this product.\n'
+			+ '- brandNote: one sentence of visual identity every item follows (palette, tone).\n'
+			+ '- sharedAssets: the pictures that appear on MORE THAN ONE item - the brand mark, any person '
+			+ 'named across items, anything recurring. Key them lowercase and snake_case by WHO or WHAT they '
+			+ 'show. Each prompt must be self-contained and specific enough to generate from, because it is '
+			+ 'generated once and used everywhere. Leave it empty when nothing genuinely recurs.';
+
+		this._runTextTurn(tab, prompt,
+			'You settle the shared facts of a board plan before its items are drawn. Output JSON only - no '
+			+ 'prose, no code fences, no tools.',
+			function(text) {
+				if (!text) return done(null);
+				var facts = null;
+				try {
+					// Models wrap JSON in prose or fences however they are asked not to;
+					// the object is what matters, so take it from wherever it sits.
+					var m = String(text).match(/\{[\s\S]*\}/);
+					if (m) facts = JSON.parse(m[0]);
+				} catch (e) { facts = null; }
+				if (!facts || typeof facts !== 'object') {
+					self.log('[plan] shared facts unreadable - items will be drawn without a registry');
+					return done(null);
+				}
+				const keys = Object.keys(facts.sharedAssets || {});
+				self.log('[plan] shared facts: "' + (facts.productName || '?') + '"'
+					+ (keys.length ? ', ' + keys.length + ' shared asset(s): ' + keys.join(', ') : ', none recurring'));
+				done(facts);
+			});
+	}
+
+	/** One agent turn that only answers - no tools, no board, nothing drawn. */
+	_runTextTurn(tab, prompt, systemPrompt, done) {
+		const self = this;
+		var settled = false;
+		const finish = function(text) { if (!settled) { settled = true; done(text); } };
+		var proc;
+		try {
+			const ws = this._effectiveWorkspace(tab);
+			const delivery = this._deliverPrompt(prompt, (tab.projectid || tab.id) + '-facts');
+			const spec = this.agent.buildArgs(this._applyDelivery({
+				cwd: ws, projectid: tab.projectid, prompt: delivery.prompt,
+				systemPrompt: systemPrompt, allowedTools: '', mockflowTools: [],
+				partialMessages: false
+			}, delivery));
+			proc = this._spawnWithPrompt(spec, delivery, { env: this._turnEnv(spec), cwd: ws });
+		} catch (err) {
+			this.log('[plan] shared-facts step could not start: ' + err.message);
+			return setImmediate(function() { finish(''); });
+		}
+
+		var out = '', buf = '';
+		proc.stdout.on('data', function(chunk) {
+			buf += chunk.toString();
+			var nl;
+			while ((nl = buf.indexOf('\n')) >= 0) {
+				var line = buf.slice(0, nl).trim();
+				buf = buf.slice(nl + 1);
+				if (!line) continue;
+				const events = self.agent.parseLine(line);
+				for (var e = 0; e < events.length; e++)
+					if (events[e].type === 'text') out += events[e].text;
+			}
+		});
+		proc.on('error', function() { finish(''); });
+		proc.on('close', function() { finish(out); });
+	}
+
 	_runPlanTurn(ctx, indices, laneId, done) {
 		const self = this;
 		const key = ctx.key;
@@ -1863,6 +1979,33 @@ class AgentManager {
 				+ 'ONE shared design system and pass the SAME viewportWidth on every screen. The board arranges '
 				+ 'itself after the last item - do not call plan_board or layout_board, do not draw anything beyond '
 				+ 'the plan, do not chat, and never output a URL or a link.';
+		}
+
+		// The facts Phase 1 settled, handed to every lane verbatim. This is what
+		// separate writers cannot work out for themselves: the product's name, its
+		// look, and the identity of every picture more than one of them will show.
+		if (ctx.shared) {
+			const sh = ctx.shared;
+			var shared = '\n\nSETTLED FOR THIS BOARD - use these EXACTLY, do not rename or reinterpret them, and'
+				+ ' do not invent alternatives. The other agents were given the same list, and this is the only'
+				+ ' thing that makes what you draw belong with what they draw.';
+			if (sh.productName) shared += '\nProduct name (use this wording everywhere it appears): "' + sh.productName + '"';
+			if (sh.brandNote) shared += '\nVisual identity: ' + sh.brandNote;
+			const akeys = Object.keys(sh.sharedAssets || {});
+			if (akeys.length) {
+				shared += '\nShared pictures - each is generated ONCE for the whole board and every item that'
+					+ ' names it shows that same picture. Where one of these belongs in what you are drawing,'
+					+ ' write the image slot with its key in front of the description, exactly'
+					+ ' "mfimg::<key>::<description>", using the key spelled as listed. Describe it in your own'
+					+ ' words if you like - the key is what identifies it. A picture that is NOT one of these is'
+					+ ' written as a normal slot with no key.';
+				for (var ak = 0; ak < akeys.length; ak++) {
+					const a = sh.sharedAssets[akeys[ak]] || {};
+					shared += '\n  ' + akeys[ak] + (a.width && a.height ? ' (' + a.width + 'x' + a.height + ')' : '')
+						+ ': ' + String(a.prompt || '').substring(0, 160);
+				}
+			}
+			systemPrompt += shared;
 		}
 
 		systemPrompt += ctx.imagery;
