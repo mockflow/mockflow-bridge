@@ -785,10 +785,13 @@ class AgentManager {
 			// The turn already RUNS in the workspace, but nothing said so: without this
 			// the agent treats "my project" / "this folder" as words in a prompt and
 			// draws from imagination instead of reading what is actually there.
+			// No tool names here: this rides every adapter's system prompt, and each CLI
+			// has its own reading tools (Claude reads with Read/Grep/Glob, Codex through
+			// its shell). Naming one CLI's tools misdirects the others.
 			systemPrompt += ' The user has given you one folder to read: ' + ws + '. It is also your '
-				+ 'working directory. When the request refers to their files, code, repo, docs, designs '
-				+ 'or says "this folder", "my project" or similar, read that folder first (Read/Grep/Glob) '
-				+ 'and base what you draw on what is really in it, rather than assuming or asking them to '
+				+ 'working directory. When the request refers to their files, code, repo, docs or '
+				+ 'designs, or to this folder or their project, read what you need from it first and '
+				+ 'base what you draw on what is really in it, rather than assuming or asking them to '
 				+ 'paste it. Their files stay on their machine: only what you draw is sent to MockFlow.';
 		}
 
