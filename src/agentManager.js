@@ -466,6 +466,23 @@ class AgentManager {
 	}
 
 	/**
+	 * Is any turn in flight? Asked before the bridge replaces itself and restarts
+	 * (updateCheck), because a turn is a running agent process drawing on someone's
+	 * board: killing it mid-draw leaves a half-built component and a chat bubble
+	 * that never finishes.
+	 *
+	 * A chat turn held open between its deciding and drawing steps counts too -
+	 * chatPhases is a turn waiting on the user's imagery answer, and it still has a
+	 * drawing step to run.
+	 */
+	isBusy() {
+		var busy = false;
+		this.sessions.forEach(function (s) { if (s && s.busy) busy = true; });
+		return busy || this.chatPhases.size > 0 || this.compgenProcs.size > 0
+			|| this.planProcs.size > 0 || this.imageProcs.size > 0;
+	}
+
+	/**
 	 * Whether a tool the agent reached for is one this turn is allowed to run.
 	 * Driven by the turn's own --allowedTools string, so it stays correct as that
 	 * list changes and needs no list of tool names of its own.

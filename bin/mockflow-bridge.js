@@ -34,7 +34,10 @@ if (isStart && cmd !== '--help' && cmd !== '-h' && cmd !== '--version' && cmd !=
 	var workspace = wsIdx !== -1 ? argv[wsIdx + 1] : null;
 	var agIdx = argv.indexOf('--agent');
 	var agent = agIdx !== -1 ? argv[agIdx + 1] : (process.env.MFBRIDGE_AGENT || null);
-	require('../src/daemon').start({ workspace: workspace, agent: agent }).catch(function(err) {
+	// Opt in to unattended updates. Off by default: replacing the global install
+	// of a machine is the user's call, not a version check's.
+	var autoUpdate = argv.indexOf('--auto-update') !== -1;
+	require('../src/daemon').start({ workspace: workspace, agent: agent, autoUpdate: autoUpdate }).catch(function(err) {
 		console.error('Failed to start: ' + (err && err.message));
 		console.error('Run `mockflow-bridge help` for all commands.');
 		process.exit(1);

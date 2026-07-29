@@ -285,6 +285,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
 | `--agent <id>` | `claude`, `codex`, `opencode` or `bridgeai`, for this run only |
+| `--auto-update` | Install a newer published bridge when one appears, then restart into it. Off by default; never runs mid turn, and never uses sudo (see Updating) |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
 | `MFBRIDGE_WORKSPACE` | Same as `--workspace` |
@@ -294,6 +295,28 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | `MFBRIDGE_PLAN_CONCURRENCY` | How many items of a board plan are drawn at once (default 3, max 6; `1` renders them one after another) |
 | `MFBRIDGE_DEV=1` | Dev mode (allow any WebSocket origin) |
 | `MFBRIDGE_DEBUG=1` | Print what each render produced (see Debugging) |
+| `MFBRIDGE_AUTO_UPDATE=1` | Same as `--auto-update` |
+| `MFBRIDGE_NO_UPDATE_CHECK=1` | Never check npm for a newer version |
+
+### Updating
+
+The bridge checks npm for a newer version while it runs. When one exists:
+
+- Press `u` in the dashboard to install it and restart. Your board stays open and reconnects by itself.
+- Or start with `--auto-update` to have it done unattended.
+
+Either way it waits for any turn in flight to finish first, because a turn is an agent
+drawing on a live board.
+
+Self-update only works when this copy is an ordinary `npm i -g` that your user can
+write to. Two cases where it is not, and what happens instead:
+
+- **Installed with `sudo`** (root owns the files): the bridge will not escalate on its
+  own, so it shows the exact command instead, `sudo npm i -g @mockflow/mockflow-bridge`.
+- **A git clone or `npm link`**: never overwritten, since that would discard your
+  changes. It says `git pull`.
+
+Running via `npx` needs nothing: it fetches the latest on every run.
 
 **BridgeAI** (the built-in OpenAI-compatible agent) reads these:
 

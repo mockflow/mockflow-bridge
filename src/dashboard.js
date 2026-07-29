@@ -104,6 +104,9 @@ let screenWrite = null, origOut = null, origErr = null, capBuf = '';
 let feedTop = 0, feedStartI = 0, feedCount = 0;
 let selecting = false, selAnchor = 0, selHead = 0;
 let copiedMsg = '', copiedTimer = null;   // transient "✓ copied" note in the ACTIVITY header
+// An npm install is running (u, or --auto-update): the strip says so and a second
+// press cannot start a second one.
+let updating = false;
 
 // The bridge mark. Box-drawing line chars sit at the cell's vertical center, so it
 // reads a touch low next to baseline text — an accepted font-metrics tradeoff.
@@ -350,12 +353,16 @@ function snapshot() {
 
 	var active = boards.filter(function (b) { return b.projectid === hub.selectedProjectId; })[0]
 		|| boards.filter(function (b) { return b.focused; })[0] || boards[0] || null;
+	var upd = updateCheck.available();
 
 	return {
 		boards: boards, agent: agent, agentOK: agentOK, isBai: isBai,
 		provider: provider, model: model, providerKey: providerKey,
 		paired: boards.length > 0, active: active,
-		upd: updateCheck.available(), warn: warn
+		// Where this copy is installed decides HOW an update is offered (a keypress,
+		// or a command to run by hand). Only worked out when there is an update to
+		// offer - snapshot() runs on every paint, and this reads the filesystem.
+		upd: upd, updWhere: upd ? updateCheck.installInfo() : null, warn: warn
 	};
 }
 
@@ -367,6 +374,7 @@ function render() {
 	if (mode === 'dashboard') lines = dash(W, H);
 	else if (mode === 'help') lines = message(W, H, 'Help', helpBody());
 	else if (mode === 'details') lines = message(W, H, 'Details', detailBody());
+	else if (mode === 'update') lines = message(W, H, 'Install the update?', updateBody());
 	else if (mode === 'quit') lines = message(W, H, 'Quit the bridge?', [
 		'', '  ' + C.white('Stop the bridge?'),
 		'  ' + C.dim('Your board stays exactly as it is — drawing just pauses'),
@@ -428,7 +436,16 @@ function dash(W, H) {
 
 	// alert strips (update at the TOP of the alert stack)
 	out.push('');
-	if (s.upd) out.push(' ' + C.cyan('⬆ Update available — v' + s.upd.current + ' → v' + s.upd.latest) + C.dim('   press ? to update'));
+	if (s.upd) {
+		// How to actually get it, for THIS copy: a keypress when the bridge can
+		// replace itself, the command (with sudo where the install is root-owned)
+		// when it cannot. A strip that says "press u" on an install u cannot touch
+		// is worse than no strip at all.
+		out.push(' ' + C.cyan('⬆ Update available — v' + s.upd.current + ' → v' + s.upd.latest)
+			+ C.dim(updating ? '   installing…'
+				: s.updWhere.selfUpdate ? '   press u to install'
+				: '   run: ' + updateCheck.command(s.updWhere)));
+	}
 	if (!s.paired) out.push(' ' + C.cyan('◎ Open MockFlow and enter code ') + C.amber(pcode()) + C.dim('   to connect a board'));
 	if (s.warn) out.push(' ' + C.amber('⚠ ' + s.warn));
 
@@ -476,6 +493,9 @@ function hotbar(W, s) {
 	var keys = [k('a', 'Change agent')];
 	if (s.agentOK && s.isBai) { keys.push(k('p', 'Provider')); keys.push(k('m', 'Model')); }
 	if (s.boards.length > 1) keys.push(k('b', 'Boards'));
+	// Only when pressing it would do something: an update exists and this copy can
+	// replace itself.
+	if (s.upd && s.updWhere.selfUpdate) keys.push(k('u', 'Update'));
 	keys.push(k('d', 'Details'));
 	keys.push(k('?', 'Help'));
 	keys.push(k('q', 'Quit', true));
@@ -532,7 +552,15 @@ function helpBody() {
 		'   ' + C.cyan('↑↓ PgUp PgDn') + ' scroll activity   ' + C.cyan('End') + ' follow live',
 		'', ' ' + C.bold('Update')
 	];
-	if (s.upd) { lines.push('   ' + C.cyan('v' + s.upd.latest + ' available') + C.dim(' (you\'re on v' + s.upd.current + ')')); lines.push('   ' + C.white('npm i -g @mockflow/mockflow-bridge')); }
+	if (s.upd) {
+		lines.push('   ' + C.cyan('v' + s.upd.latest + ' available') + C.dim(' (you\'re on v' + s.upd.current + ')'));
+		if (s.updWhere.selfUpdate) {
+			lines.push('   ' + C.cyan('u') + ' install it and restart' + C.dim('  ·  or start with --auto-update'));
+		} else {
+			lines.push('   ' + C.white(updateCheck.command(s.updWhere)));
+			if (s.updWhere.needsSudo) lines.push('   ' + C.dim('this install is owned by another user, so it needs sudo'));
+		}
+	}
 	else lines.push('   ' + C.green('up to date ✓'));
 	lines.push(''); lines.push(' ' + C.bold('Need a hand?'));
 	lines.push('   ' + C.cyan('support.mockflow.com') + C.dim(' · ') + C.cyan('support@mockflow.com'));
@@ -612,6 +640,7 @@ function onKey(str, key) {
 			case 'm': if (s.agentOK && s.isBai) return openModel(); return;
 			case 'b': if (s.boards.length > 1) return openBoard(); return;
 			case 'y': return yankFeed();
+			case 'u': if (s.upd && s.updWhere.selfUpdate && !updating) { mode = 'update'; return render(); } return;
 			case 'd': mode = 'details'; return render();
 			case '?': case 'h': mode = 'help'; return render();
 			case 'q': mode = 'quit'; return render();
@@ -619,6 +648,11 @@ function onKey(str, key) {
 		return;
 	}
 	if (mode === 'help' || mode === 'details') { if (key.name === 'escape') { mode = 'dashboard'; render(); } return; }
+	if (mode === 'update') {
+		if (str === 'y' || str === 'Y') return startUpdate();
+		if (key.name === 'escape') { mode = 'dashboard'; render(); }
+		return;
+	}
 	if (mode === 'quit') {
 		if (str === 'y' || str === 'Y') return quit();
 		if (key.name === 'escape') { mode = 'dashboard'; render(); }
@@ -647,7 +681,14 @@ function warnFromProblems(problems) {
 
 function restoreScreen() { try { scr(E + '0m' + WRAP_ON + MOUSE_OFF + CUR_SHOW + ALT_OFF); } catch (e) {} }
 
-function quit() {
+/**
+ * Give the terminal back and stop rendering, WITHOUT ending the bridge. The
+ * daemon calls this before it restarts into an updated version: the replacement
+ * inherits this terminal, and it must find a normal screen rather than the
+ * alternate buffer this was drawing into.
+ */
+function stop() {
+	if (!active) return;
 	active = false;
 	if (tick) clearInterval(tick);
 	try { process.stdin.setRawMode && process.stdin.setRawMode(false); } catch (e) {}
@@ -657,6 +698,10 @@ function quit() {
 	if (origOut) process.stdout.write = origOut;
 	if (origErr) process.stderr.write = origErr;
 	restoreScreen();
+}
+
+function quit() {
+	stop();
 	if (typeof ctx.onQuit === 'function') ctx.onQuit();
 }
 
@@ -669,8 +714,67 @@ let announcedUpdate = '';
 function notifyUpdate(info) {
 	if (!active || announcedUpdate === info.latest) return;   // the watch re-checks; announce once
 	announcedUpdate = info.latest;
-	pushAct('⬆', 'ok', 'Update available — v' + info.current + ' → v' + info.latest
-		+ '.  npm i -g ' + ctx.config.PKG_NAME);
+	const where = updateCheck.installInfo();
+	pushAct('⬆', 'ok', 'Update available — v' + info.current + ' → v' + info.latest + '.  '
+		+ (where.selfUpdate ? 'Press u to install it.' : updateCheck.command(where)));
 }
 
-module.exports = { start: start, notifyUpdate: notifyUpdate };
+/* ---------------------------------------------------------- update --- */
+
+/** The confirm overlay for `u`. Says what will happen, in that order. */
+function updateBody() {
+	const s = snapshot();
+	const busy = !!(agents.isBusy && agents.isBusy());
+	const out = ['',
+		'  ' + C.white('Update to v' + (s.upd ? s.upd.latest : '?') + '?')
+			+ C.dim('   you\'re on v' + ctx.config.ENGINE_VERSION),
+		'',
+		'  ' + C.dim('Runs ') + C.cyan('npm i -g ' + ctx.config.PKG_NAME) + C.dim(', then restarts the bridge.'),
+		'  ' + C.dim('Your board stays open and reconnects by itself.'),
+		''];
+	if (busy) {
+		out.push('  ' + C.amber('A turn is running right now.') + C.dim(' Let it finish, then press u again.'));
+		out.push('');
+		out.push('  ' + C.cyan('esc') + ' back');
+	} else {
+		out.push('  ' + C.cyan('y') + ' install    ' + C.cyan('esc') + ' not now');
+	}
+	return out;
+}
+
+/**
+ * Install and restart. Runs in the open: npm's output goes into the Activity
+ * feed line by line, because "the screen froze for a minute" is what a silent
+ * install looks like.
+ */
+function startUpdate() {
+	if (updating) return;
+	mode = 'dashboard';
+	if (agents.isBusy && agents.isBusy()) {
+		// Between opening the overlay and pressing y, a turn may have started.
+		pushAct('⬆', 'err', 'Update postponed — a turn is running. Press u again when it finishes.');
+		return render();
+	}
+	const info = updateCheck.available();
+	updating = true;
+	pushAct('⬆', 'run', 'Installing v' + (info ? info.latest : 'latest') + '…');
+	render();
+	updateCheck.install(
+		function (line) { pushAct('·', 'sys', 'npm: ' + line); },
+		function (err, version) {
+			updating = false;
+			if (err) {
+				pushAct('⬆', 'err', 'Update failed — ' + err.message);
+				return render();
+			}
+			pushAct('⬆', 'ok', 'Updated to v' + version + ' — restarting…');
+			render();
+			// A beat, so that last line is actually on screen before the terminal is
+			// handed to the new process.
+			setTimeout(function () {
+				if (typeof ctx.onRestart === 'function') ctx.onRestart('updated to v' + version);
+			}, 400);
+		});
+}
+
+module.exports = { start: start, notifyUpdate: notifyUpdate, stop: stop };

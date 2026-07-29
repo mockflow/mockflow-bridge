@@ -30,6 +30,7 @@ function help() {
 	console.log(paint.bold('Start options:'));
 	line('--workspace <path>', 'let the agent read one folder');
 	line('--agent <id>', 'run this start on a specific agent CLI');
+	line('--auto-update', 'install a newer bridge when one is published, then restart');
 	console.log('');
 	console.log(paint.bold('Agent commands:'));
 	line('mockflow-bridge agent', 'list installed agents and which one is in use');

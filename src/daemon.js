@@ -275,16 +275,96 @@ async function start(opts) {
 		: [];
 	const updateCheck = require('./updateCheck');
 
-	function shutdown() {
-		log('Shutting down');
+	function stopServices() {
 		agents.clearAllAttachments();
 		hub.stop();
 		server.close();
 		removePortFile();
+	}
+
+	function shutdown() {
+		log('Shutting down');
+		stopServices();
+		process.exit(0);
+	}
+
+	/**
+	 * Restart this process, running whatever is on disk now. Used after a
+	 * self-update: the running daemon keeps the OLD code in memory (and would
+	 * load a mix of old and new for anything required later), so the new version
+	 * only takes effect here.
+	 *
+	 * The port is released FIRST and the replacement is detached and given this
+	 * terminal, so the user sees the new bridge come up in the same window. Board
+	 * tabs reconnect on their own (browser/mockflow-bridge-client.js backs off and
+	 * retries), so nobody has to touch the editor.
+	 */
+	// Set in dashboard mode: the alternate screen has to be handed back before the
+	// replacement inherits this terminal, or it starts up drawing into a screen
+	// buffer the user cannot see.
+	var beforeRestart = null;
+
+	function restart(why) {
+		log('Restarting' + (why ? ' (' + why + ')' : ''));
+		if (beforeRestart) { try { beforeRestart(); } catch (e) {} }
+		stopServices();
+		try {
+			const child = require('child_process').spawn(
+				process.execPath, process.argv.slice(1),
+				{ stdio: 'inherit', detached: true, cwd: process.cwd(), env: process.env });
+			child.unref();
+		} catch (e) {
+			// Nothing is running now, and pretending otherwise would leave the user
+			// with a dead bridge and no message.
+			console.error('The bridge could not restart itself: ' + (e && e.message));
+			console.error('Start it again with: mockflow-bridge');
+		}
 		process.exit(0);
 	}
 	process.on('SIGINT', shutdown);
 	process.on('SIGTERM', shutdown);
+
+	/**
+	 * --auto-update (or MFBRIDGE_AUTO_UPDATE=1): install a newer published bridge
+	 * and restart into it, unattended. Opt-in on purpose - rewriting the global
+	 * node_modules of a machine is not something to do because a version check came
+	 * back positive.
+	 *
+	 * Never mid-turn: a turn is an agent process drawing on someone's board, so a
+	 * busy bridge waits and looks again shortly rather than killing it.
+	 */
+	const autoUpdate = !!((opts && opts.autoUpdate) || process.env.MFBRIDGE_AUTO_UPDATE === '1');
+	const BUSY_RETRY_MS = 60 * 1000;
+	var updating = false, busyRetry = null;
+	function autoInstall(info) {
+		if (!autoUpdate || updating) return;
+		const where = updateCheck.installInfo();
+		if (!where.selfUpdate) {
+			// Said once per version by the caller's own "behind" notice; this adds the
+			// reason --auto-update did nothing, which is otherwise invisible.
+			log('Update v' + info.latest + ' is available but this copy cannot be replaced from here ('
+				+ where.kind + (where.needsSudo ? ', not writable by this user' : '') + '). Run: '
+				+ updateCheck.command(where));
+			return;
+		}
+		if (agents.isBusy()) {
+			if (busyRetry) return;
+			log('Update v' + info.latest + ' available - waiting for the running turn to finish');
+			busyRetry = setTimeout(function () { busyRetry = null; autoInstall(info); }, BUSY_RETRY_MS);
+			if (busyRetry.unref) busyRetry.unref();
+			return;
+		}
+		updating = true;
+		log('Auto-update: installing v' + info.latest + ' (v' + config.ENGINE_VERSION + ' now)');
+		updateCheck.install(
+			function (line) { log('npm: ' + line); },
+			function (err, version) {
+				updating = false;
+				if (err) return log('Auto-update failed: ' + err.message);
+				log('Updated to v' + version);
+				restart('updated to v' + version);
+			});
+	}
 
 	// Full-screen dashboard in a real terminal (best for non-devs); plain banner +
 	// line output only when piped, in CI, or headless. In DEBUG the dashboard stays
@@ -296,11 +376,19 @@ async function start(opts) {
 		dashboard.start({
 			hub: hub, agents: agents, registry: agentRegistry, config: config,
 			endpoint: endpoint, mcpToken: mcpToken, healthProblems: healthProblems,
-			onQuit: shutdown
+			onQuit: shutdown,
+			// Pressing u installs the update and comes back on the new version.
+			onRestart: restart
 		});
+		// The dashboard owns this terminal, so it hands it back before the
+		// replacement process inherits it.
+		beforeRestart = dashboard.stop;
 		// After start(), so a verdict from a still-fresh cache lands on a live screen.
 		// Re-checked while we run too - this process outlives an npm publish.
-		startUpdateWatch(updateCheck, function (info) { dashboard.notifyUpdate(info); });
+		startUpdateWatch(updateCheck, function (info) {
+			dashboard.notifyUpdate(info);
+			autoInstall(info);
+		});
 		return { server: server, hub: hub, mcp: mcp };
 	}
 
@@ -371,9 +459,11 @@ async function start(opts) {
 	// synchronous startup finishes). When it comes back behind, say so now rather
 	// than leaving it for the next start - but never twice for the same version.
 	startUpdateWatch(updateCheck, function (info) {
-		if (shownUpdate === info.latest) return;
-		shownUpdate = info.latest;
-		printUpdate();
+		if (shownUpdate !== info.latest) {
+			shownUpdate = info.latest;
+			printUpdate();
+		}
+		autoInstall(info);
 	});
 
 	console.error(ui.pairingLine(hub.pairingCode,

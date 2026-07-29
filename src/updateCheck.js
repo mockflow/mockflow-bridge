@@ -22,8 +22,10 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const https = require('https');
 const config = require('./config');
+const { spawnCli } = require('./agents/spawnPortable');
 
 // Every few hours, not once a day: a day-long cache means a fresh publish stays
 // invisible across several restarts, which is indistinguishable from a broken check.
@@ -74,10 +76,15 @@ function notice(paint) {
 	const cache = readCache();
 	if (!cache || !cache.latest) return null;
 	if (!behind(config.ENGINE_VERSION, cache.latest)) return null;
-	return [
+	// The command for THIS copy, so a root-owned install is told to use sudo rather
+	// than being handed a line that fails with EACCES.
+	const info = installInfo();
+	const lines = [
 		paint.bold('Update available') + ': ' + config.ENGINE_VERSION + ' → ' + paint.green(cache.latest),
-		paint.dim('  npm i -g ' + config.PKG_NAME)
+		paint.dim('  ' + command(info))
 	];
+	if (info.selfUpdate) lines.push(paint.dim('  or start with --auto-update to install it here'));
+	return lines;
 }
 
 /**
@@ -126,6 +133,135 @@ function refresh(onUpdate) {
 	} catch (e) { finish(); }
 }
 
+/* ------------------------------------------------------- self-update --- */
+
+/** An npm install that has to fetch and unpack a package; generous, but bounded. */
+const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+const ROOT = path.join(__dirname, '..');
+
+function canWrite(p) {
+	try { fs.accessSync(p, fs.constants.W_OK); return true; }
+	catch (e) { return false; }
+}
+
+/**
+ * How this copy is installed, and whether THIS process may replace it.
+ *
+ *   kind 'global' - an ordinary `npm i -g`, the only kind we ever install over.
+ *   kind 'source' - a git clone or an `npm link`ed one. Overwriting a developer's
+ *                   working copy with the published tarball would throw away
+ *                   their changes, so it is never offered.
+ *   kind 'npx'    - run straight from the npx cache, which already fetches the
+ *                   latest on every run. There is nothing to update.
+ *
+ * `writable` is checked on the package directory AND its parent, because npm
+ * removes and recreates the directory rather than writing inside it. A global
+ * install owned by root (the usual result of `sudo npm i -g`) is therefore not
+ * writable by a bridge running as the user, and self-update is refused: see
+ * command(), which then says to run it with sudo by hand. Nothing here ever
+ * ESCALATES on its own - a daemon has nobody to answer a password prompt, and a
+ * version check is no reason to run install scripts as root.
+ */
+function installInfo() {
+	var linked = false;
+	try { linked = fs.lstatSync(ROOT).isSymbolicLink(); } catch (e) {}
+	const isClone = fs.existsSync(path.join(ROOT, '.git'));
+	const inNpx = /[\\/]_npx[\\/]/.test(ROOT);
+	const kind = (isClone || linked) ? 'source' : (inNpx ? 'npx' : 'global');
+	const writable = kind === 'global' && canWrite(ROOT) && canWrite(path.dirname(ROOT));
+	return {
+		kind: kind,
+		dir: ROOT,
+		writable: writable,
+		// The one case where pressing a button can actually replace this copy.
+		selfUpdate: kind === 'global' && writable,
+		// A global install this process cannot write: the user can still update it,
+		// with sudo, by hand.
+		needsSudo: kind === 'global' && !writable
+	};
+}
+
+/** The command a user would run to update this particular copy, sudo included. */
+function command(info) {
+	const i = info || installInfo();
+	if (i.kind === 'source') return 'git pull';
+	return (i.needsSudo ? 'sudo ' : '') + 'npm i -g ' + config.PKG_NAME;
+}
+
+/** The version on disk right now, re-read (npm has just replaced package.json). */
+function installedVersion() {
+	try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || ''; }
+	catch (e) { return ''; }
+}
+
+/**
+ * Install the published version over this one. `onLine` receives npm's output a
+ * line at a time (for the Activity feed); `done(err, version)` fires once.
+ *
+ * Refused outright unless installInfo().selfUpdate - a source checkout must not
+ * be overwritten, and a root-owned install cannot be, so pretending to try would
+ * only produce a confusing EACCES.
+ */
+function install(onLine, done) {
+	const info = installInfo();
+	const finish = function (err, v) { if (done) { done(err, v); done = null; } };
+	if (!info.selfUpdate) {
+		return finish(new Error(info.kind === 'source'
+			? 'This is a source checkout, not an npm install - update it with git.'
+			: info.kind === 'npx'
+				? 'This copy runs from the npx cache, which already fetches the latest version.'
+				: 'This install belongs to another user (' + info.dir + '), so it cannot be replaced '
+					+ 'from here. Update it by hand with: ' + command(info)));
+	}
+
+	const say = function (s) {
+		String(s).split('\n').forEach(function (l) {
+			const t = l.replace(/\s+$/, '');
+			if (t && onLine) { try { onLine(t); } catch (e) {} }
+		});
+	};
+
+	var proc;
+	try {
+		proc = spawnCli('npm', ['install', '-g', '--no-fund', '--no-audit', config.PKG_NAME + '@latest'],
+			{ stdio: ['ignore', 'pipe', 'pipe'] });
+	} catch (e) {
+		return finish(new Error('Could not run npm: ' + (e && e.message)));
+	}
+
+	var tail = '';
+	if (proc.stdout) proc.stdout.on('data', function (d) { say(d.toString()); });
+	if (proc.stderr) proc.stderr.on('data', function (d) {
+		const s = d.toString();
+		tail = (tail + s).slice(-2000);
+		say(s);
+	});
+	const timer = setTimeout(function () {
+		try { proc.kill('SIGTERM'); } catch (e) {}
+		finish(new Error('npm took longer than ' + Math.round(INSTALL_TIMEOUT_MS / 60000) + ' minutes and was stopped.'));
+	}, INSTALL_TIMEOUT_MS);
+
+	proc.on('error', function (err) { clearTimeout(timer); finish(new Error('Could not run npm: ' + err.message)); });
+	proc.on('close', function (code) {
+		clearTimeout(timer);
+		if (code !== 0) {
+			const why = tail.split('\n').filter(function (l) { return l.trim(); }).pop() || ('npm exited ' + code);
+			return finish(new Error(why.slice(0, 300)));
+		}
+		const v = installedVersion();
+		// npm can exit 0 having installed somewhere else entirely (a different prefix
+		// than the one this copy lives in), and then a "success" that changes nothing
+		// would send the bridge into a restart loop under --auto-update.
+		if (v && v === config.ENGINE_VERSION) {
+			return finish(new Error('npm reported success but ' + info.dir + ' is still v' + v
+				+ '. It may have installed to a different npm prefix; update it by hand with: '
+				+ command(info)));
+		}
+		finish(null, v);
+	});
+}
+
 /** { current, latest } when an update is available, else null. For the dashboard. */
 function available() {
 	if (disabled()) return null;
@@ -135,4 +271,4 @@ function available() {
 	return { current: config.ENGINE_VERSION, latest: cache.latest };
 }
 
-module.exports = { notice, refresh, behind, available };
+module.exports = { notice, refresh, behind, available, installInfo, command, install };
