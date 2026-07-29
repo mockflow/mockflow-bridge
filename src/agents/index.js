@@ -13,7 +13,13 @@
  *
  *   id, label
  *   capabilities   { streamsPartialText, announcesToolsEarly, restrictTools,
- *                    resume, systemPrompt, extraDirs }
+ *                    resume, systemPrompt, systemPromptPerTurn, extraDirs }
+ *                  systemPromptPerTurn:false says the CLI reads the system prompt
+ *                    only when a session is CREATED, so a resumed turn keeps the
+ *                    first one for good. Say so and agentManager carries a turn's
+ *                    own instructions in the message instead - do NOT assume the
+ *                    flag or config key works on resume just because it is accepted
+ *                    there; Codex accepts it and silently ignores it.
  *   detect()       -> { available, version }
  *   installHint()  -> what to tell the user when it is missing
  *   mcpAddHint(endpoint) -> { title, lines[] } shown at startup: how to point

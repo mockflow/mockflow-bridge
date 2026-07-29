@@ -132,6 +132,13 @@ module.exports = {
 		restrictTools: 'per-run',
 		resume: 'by-id',
 		systemPrompt: 'config',
+		// ...and that config is read ONLY when a thread is created. `exec resume`
+		// takes the -c developer_instructions below without complaint and drops it:
+		// the resumed turn logs `thread_settings_applied ... developer_instructions:
+		// null` and adds no developer message, so the thread keeps the one written on
+		// its first turn for good. Verified in a rollout (~/.codex/sessions) on 0.145.0.
+		// agentManager reads this and moves a turn's own instructions into the message.
+		systemPromptPerTurn: false,
 		// Nothing to add: the read-only sandbox already lets a turn READ anywhere
 		// (it only blocks writes), so attachment folders need no extra grant.
 		// `--add-dir` would be wrong anyway - it makes a directory WRITABLE.

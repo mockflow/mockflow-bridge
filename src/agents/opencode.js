@@ -128,6 +128,12 @@ module.exports = {
 		restrictTools: 'per-run',
 		resume: 'by-id',
 		systemPrompt: 'config',
+		// The agent prompt rides OPENCODE_CONFIG_CONTENT, which is read on every run,
+		// resumed sessions included, so a turn's own instructions really are its own.
+		// Verified on 1.18.4 rather than assumed: one turn on an agent told to answer
+		// "BANANA", then `-s <same session>` with the prompt changed to "KIWI",
+		// answered KIWI. (Codex fails that test - see agents/codex.js.)
+		systemPromptPerTurn: true,
 		// No --add-dir equivalent, and its read tool refuses paths outside the
 		// working directory. Attachments still work, but through `-f` (see
 		// buildArgs), not by granting a directory.

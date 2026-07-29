@@ -28,6 +28,9 @@ module.exports = {
 		restrictTools: 'per-run',   // only allowed tools are put in `tools`
 		resume: 'by-id',            // transcript kept on disk per session id
 		systemPrompt: 'config',     // system message in messages[]
+		// ...and run.js rewrites that system message on every turn, resumed ones
+		// included, so a turn's own instructions really are its own.
+		systemPromptPerTurn: true,
 		extraDirs: false            // attachments read + inlined directly
 	},
 

@@ -743,12 +743,17 @@ class AgentManager {
 		// path in the prompt) - so skip this "no file access" line when there is an
 		// attachment, or the agent (notably Codex, which does not take extraDirs)
 		// parrots "restart with --workspace" and refuses to read the file it was handed.
-		var systemPrompt = PERSONA + RESEARCH_GUIDANCE + this._openImageTurn(hub, tab, frame);
+		var systemPrompt = PERSONA + RESEARCH_GUIDANCE;
+		// Instructions that are true of THIS message only: the imagery answer the user
+		// just gave, and the component the deciding step settled on. Held apart from
+		// the persona because an agent whose system prompt applies only when a session
+		// is CREATED has to be given them another way - see turnInstructionsInMessage.
+		var turnInstructions = this._openImageTurn(hub, tab, frame);
 		// The drawing step of a decide-then-draw turn: the choice was already made (and
 		// the user answered the imagery question about THAT choice), so it is stated
 		// rather than left to be made a second time from the bare request.
 		if (!declarePhase && frame.__declared) {
-			systemPrompt += (frame.__declared === 'plan')
+			turnInstructions += (frame.__declared === 'plan')
 				? ' You already decided this turn needs SEVERAL DIFFERENT components: call plan_board now '
 					+ 'with the component list and stop, and draw nothing yourself.'
 				// A corrected choice is NOT pinned the same way: the component that was
@@ -774,7 +779,18 @@ class AgentManager {
 				+ 'again, that is still this step: read it, decide again and call declare_render once more - '
 				+ 'nothing has failed and nothing has been drawn. When your choice is accepted, write NO reply '
 				+ 'text at all: the drawing step follows immediately and speaks to the user itself.';
+			// The deciding step has no drawing tools and runs on a fresh session every
+			// time, so neither the imagery answer nor a component pin means anything to
+			// it: its own framing above is the whole instruction.
+			turnInstructions = '';
 		}
+		// Where this turn's own instructions go. In the system prompt for an agent that
+		// applies one per run; otherwise they ride the message (below), because a system
+		// prompt that only lands when a session is created would deliver them once and
+		// then repeat them, stale, on every later turn of that session.
+		const turnInstructionsInMessage = !!turnInstructions
+			&& this.agent.capabilities.systemPromptPerTurn === false;
+		if (turnInstructions && !turnInstructionsInMessage) systemPrompt += turnInstructions;
 		if (!this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
@@ -810,6 +826,22 @@ class AgentManager {
 				this.log('Could not save attachment:', e && e.message);
 				return sendToTab({ t: 'chat-done', id: turnId, ok: false, error: 'Could not save the attached file on this machine: ' + (e && e.message) });
 			}
+		}
+
+		// This turn's own instructions, carried by the message because the agent's
+		// system prompt is fixed when the session is created and a resumed turn never
+		// sees a new one (Codex: `exec resume` ignores developer_instructions). Left
+		// where it was, the FIRST turn's imagery answer and component pin would govern
+		// every later turn of that session - which is how a moodboard request came back
+		// as a mindmap: the session's first turn had declared one, and its pin was
+		// still the only one the agent could see. So they are said again here, for this
+		// message, and say plainly that they replace the earlier ones.
+		if (turnInstructionsInMessage) {
+			turnText = 'INSTRUCTIONS FOR THIS MESSAGE, from the MockFlow board this conversation runs in. '
+				+ 'They REPLACE anything said earlier in this conversation about imagery or about which '
+				+ 'component to draw: that belonged to an earlier message and does not apply now.'
+				+ turnInstructions.replace(/\s+$/, '')
+				+ '\n\nThe user says:\n' + turnText;
 		}
 
 		const allowedTools = this._allowedTools();

@@ -58,8 +58,19 @@ async function main() {
 		// (the render_* rules Claude Code would otherwise absorb automatically).
 		const sys = [turn.systemPrompt || '', (init && init.instructions) || ''].filter(Boolean).join('\n\n');
 
+		// Rebuilt on EVERY turn, not only when the transcript is empty. The manager's
+		// system prompt carries what is true of THIS turn: the imagery answer the user
+		// just gave and the component the deciding step settled on. Kept only from the
+		// first turn, a resumed session runs on instructions that belong to a turn that
+		// is long over, and a stale component pin does not merely go missing - it
+		// steers: a moodboard request came back as a mindmap because the session's
+		// first turn had declared one. (Codex has the same trap in its own CLI, which
+		// it cannot be fixed from - see agents/codex.js systemPromptPerTurn.)
 		const messages = session.load(turn.resume);
-		if (!messages.length && sys) messages.push({ role: 'system', content: sys });
+		if (sys) {
+			if (messages.length && messages[0].role === 'system') messages[0] = { role: 'system', content: sys };
+			else messages.unshift({ role: 'system', content: sys });
+		}
 
 		const parts = attachments.toContentParts(turn.attachments);
 		if (parts.length) {

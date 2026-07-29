@@ -92,6 +92,9 @@ module.exports = {
 		restrictTools: 'per-run',   // an allowlist can be passed per turn
 		resume: 'by-id',            // sessions resume by an id we captured
 		systemPrompt: 'flag',       // per-turn instructions ride a flag
+		// --append-system-prompt is applied on every run, --resume included, so a
+		// turn's own instructions really are its own (contrast codex).
+		systemPromptPerTurn: true,
 		extraDirs: true,            // extra readable directories per turn
 		// -p reads the prompt from argv, but piped stdin is available to the turn as
 		// context. On Windows that lets a large/multi-line prompt bypass the cmd.exe
