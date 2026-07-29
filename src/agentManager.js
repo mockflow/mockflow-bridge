@@ -386,6 +386,14 @@ class AgentManager {
 		}
 
 		// Fallback: stdin, for an agent that reads it but has no read tool.
+		//
+		// For codex this is not a fallback but its DOCUMENTED prompt channel (`codex
+		// exec -`), and the only one it has: it takes no file-reading directive, and
+		// its prompt is the last argv entry, so a newline on the cmd.exe line truncates
+		// the request itself. That is what left "convert this attachment to a
+		// whiteboard" hanging on Windows - every attachment prompt has newlines, codex
+		// received at most its first line, and a codex with no usable prompt argument
+		// waits on stdin. See agents/codex.js acceptsStdinPrompt.
 		if (caps.acceptsStdinPrompt) {
 			return {
 				prompt: 'Carry out the task described on standard input exactly. If it lists items to create or '
@@ -403,6 +411,10 @@ class AgentManager {
 	 * inline and stdin paths. Returns the same turn object for chaining.
 	 */
 	_applyDelivery(turn, delivery) {
+		// The prompt is on stdin, not on the command line. A CLI that takes it as a
+		// positional needs to be TOLD (codex passes `-`), so the flag travels with
+		// the turn; adapters that read stdin as plain context ignore it.
+		if (delivery && delivery.stdin != null) turn.stdinPrompt = true;
 		if (delivery && delivery.file) {
 			if (delivery.file.tool) {
 				turn.allowedTools = turn.allowedTools

@@ -142,7 +142,17 @@ module.exports = {
 		// Nothing to add: the read-only sandbox already lets a turn READ anywhere
 		// (it only blocks writes), so attachment folders need no extra grant.
 		// `--add-dir` would be wrong anyway - it makes a directory WRITABLE.
-		extraDirs: false
+		extraDirs: false,
+		// `codex exec [PROMPT]`: "If not provided as an argument (or if `-` is used),
+		// instructions are read from stdin" - and the same on `exec resume`. That is
+		// the only way a MULTI-LINE prompt can reach this CLI on Windows, where the
+		// command line goes through cmd.exe and a newline ends it (see
+		// agentManager._deliverPrompt). Without this, an attachment turn - whose
+		// prompt always has newlines - lost everything after its first line, and a
+		// prompt mangled past recognition left codex reading instructions from a
+		// stdin nobody was writing to: the turn hung, and Mida said "Thinking..."
+		// until the user gave up. Verified against `codex exec --help` on 0.145.0.
+		acceptsStdinPrompt: true
 	},
 
 	detect() {
@@ -224,7 +234,11 @@ module.exports = {
 		// turn.extraDirs is deliberately ignored (capabilities.extraDirs = false):
 		// read-only already permits reading them, and --add-dir is resume-hostile.
 
-		args.push(turn.prompt);
+		// `-` is the positional that says "the prompt is on stdin"; agentManager
+		// writes it there and closes the pipe. The directive it puts in turn.prompt
+		// for that route is for CLIs that read stdin as extra context, and would be
+		// a second, conflicting instruction here - codex takes stdin AS the prompt.
+		args.push(turn.stdinPrompt ? '-' : turn.prompt);
 		return { args: args, env: {} };
 	},
 
