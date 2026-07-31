@@ -81,10 +81,52 @@ function notice(paint) {
 	const info = installInfo();
 	const lines = [
 		paint.bold('Update available') + ': ' + config.ENGINE_VERSION + ' → ' + paint.green(cache.latest),
-		paint.dim('  ' + command(info))
+		paint.dim('  ' + userCommand(info))
 	];
 	if (info.selfUpdate) lines.push(paint.dim('  or start with --auto-update to install it here'));
 	return lines;
+}
+
+/**
+ * Ask the registry for the published version, ignoring the cache, and write it
+ * there on success. `done(err, version)` fires exactly once. Never throws.
+ *
+ * `hold` keeps the socket referenced: the background watcher must not be a
+ * reason the process stays alive, but `mockflow-bridge update` has nothing else
+ * to wait on, and an unref'd request would let node exit before the answer.
+ */
+function fetchLatest(done, hold) {
+	// The registry serves scoped names unencoded; /latest is the abbreviated doc.
+	const url = 'https://registry.npmjs.org/' + config.PKG_NAME + '/latest';
+	let settled = false;
+	let req;
+	const finish = function (err, v) {
+		if (settled) return;
+		settled = true;
+		try { req.destroy(); } catch (e) {}
+		if (done) done(err || null, v || '');
+	};
+	const fail = function () { finish(new Error('Could not reach the npm registry.')); };
+
+	try {
+		req = https.get(url, { timeout: REQUEST_TIMEOUT_MS, headers: { accept: 'application/json' } }, function (res) {
+			if (res.statusCode !== 200) { res.resume(); return fail(); }
+			let body = '';
+			res.setEncoding('utf8');
+			res.on('data', function (c) { body += c; if (body.length > 1e6) fail(); });
+			res.on('end', function () {
+				var v = '';
+				try { v = JSON.parse(body).version; } catch (e) {}
+				if (!v) return fail();
+				writeCache(String(v));
+				finish(null, String(v));
+			});
+		});
+		req.on('timeout', fail);
+		req.on('error', fail);
+		// Do not let a pending check hold the process open on its own.
+		if (!hold && req.unref) req.unref();
+	} catch (e) { fail(); }
 }
 
 /**
@@ -105,32 +147,7 @@ function refresh(onUpdate) {
 		// say we are behind, and the caller has not been told yet.
 		return tell();
 	}
-
-	// The registry serves scoped names unencoded; /latest is the abbreviated doc.
-	const url = 'https://registry.npmjs.org/' + config.PKG_NAME + '/latest';
-	let done = false;
-	let req;
-	const finish = function () { if (done) return; done = true; try { req.destroy(); } catch (e) {} };
-
-	try {
-		req = https.get(url, { timeout: REQUEST_TIMEOUT_MS, headers: { accept: 'application/json' } }, function (res) {
-			if (res.statusCode !== 200) { res.resume(); return finish(); }
-			let body = '';
-			res.setEncoding('utf8');
-			res.on('data', function (c) { body += c; if (body.length > 1e6) finish(); });
-			res.on('end', function () {
-				try {
-					const v = JSON.parse(body).version;
-					if (v) { writeCache(String(v)); tell(); }
-				} catch (e) {}
-				finish();
-			});
-		});
-		req.on('timeout', finish);
-		req.on('error', finish);
-		// Do not let a pending check hold the process open on its own.
-		if (req.unref) req.unref();
-	} catch (e) { finish(); }
+	fetchLatest(function (err) { if (!err) tell(); });
 }
 
 /* ------------------------------------------------------- self-update --- */
@@ -187,6 +204,17 @@ function command(info) {
 	const i = info || installInfo();
 	if (i.kind === 'source') return 'git pull';
 	return (i.needsSudo ? 'sudo ' : '') + 'npm i -g ' + config.PKG_NAME;
+}
+
+/**
+ * What to TELL the user to run. Same as command(), except an ordinary global
+ * install this process could replace is pointed at `mockflow-bridge update`,
+ * which is shorter to remember and does the version check itself. The npm line
+ * stays the answer wherever that command would only refuse (sudo, checkout, npx).
+ */
+function userCommand(info) {
+	const i = info || installInfo();
+	return i.selfUpdate ? 'mockflow-bridge update' : command(i);
 }
 
 /** The version on disk right now, re-read (npm has just replaced package.json). */
@@ -271,4 +299,4 @@ function available() {
 	return { current: config.ENGINE_VERSION, latest: cache.latest };
 }
 
-module.exports = { notice, refresh, behind, available, installInfo, command, install };
+module.exports = { notice, refresh, behind, available, installInfo, command, userCommand, install, fetchLatest };

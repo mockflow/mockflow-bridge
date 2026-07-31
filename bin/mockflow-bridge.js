@@ -6,6 +6,7 @@
  *
  *   mockflow-bridge            start the daemon (default)
  *   mockflow-bridge status     daemon status + connected boards
+ *   mockflow-bridge update     install the newest published bridge
  *   mockflow-bridge agent      show / change which local agent CLI answers
  *   mockflow-bridge reset      clear saved bridge state
  *   mockflow-bridge stdio      stdio MCP shim -> running daemon
@@ -56,6 +57,8 @@ if (isStart && cmd !== '--help' && cmd !== '-h' && cmd !== '--version' && cmd !=
 	});
 } else if (cmd === 'status') {
 	require('../src/cli').status();
+} else if (cmd === 'update' || cmd === 'upgrade') {
+	require('../src/cli').update(rest);
 } else if (cmd === 'agent' || cmd === 'agents') {
 	require('../src/cli').agent(rest);
 } else if (cmd === 'reset') {

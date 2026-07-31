@@ -11,6 +11,7 @@ const config = require('./config');
 const ui = require('./ui');
 const registry = require('./agents');
 const picker = require('./agentPicker');
+const updateCheck = require('./updateCheck');
 
 const paint = ui.out;
 
@@ -22,6 +23,7 @@ function help() {
 	console.log(paint.bold('Commands:'));
 	line('mockflow-bridge', 'start the bridge daemon (leave it running)');
 	line('mockflow-bridge status', 'is the daemon running, which boards are connected');
+	line('mockflow-bridge update', 'install the newest published bridge  (--check to only look)');
 	line('mockflow-bridge agent', 'show / change which local agent CLI answers');
 	line('mockflow-bridge reset', 'clear saved bridge state and start clean');
 	line('mockflow-bridge stdio', 'stdio MCP shim for clients that cannot use HTTP');
@@ -104,6 +106,103 @@ async function status() {
 		console.log('  ' + paint.dim('boards') + '  : none connected - open a board and switch on "Connect local agent"');
 	}
 	console.log('  ' + paint.dim('help') + '    : ' + paint.teal('mockflow-bridge help'));
+}
+
+/* ---------------------------------------------------------------- update - */
+
+/**
+ * `update` (install the published version) | `update --check` (just look).
+ *
+ * The one command a user should have to remember instead of retyping the npm
+ * line: it asks the registry directly (never the background cache, which can be
+ * hours old), and installs only over an ordinary `npm i -g` this user owns.
+ * Everything else - a git clone, an npm link, a root-owned install, npx - is
+ * told the exact command for its case rather than being half-updated. It never
+ * escalates to sudo on its own.
+ *
+ * MFBRIDGE_NO_UPDATE_CHECK silences the background check, not this: the user
+ * asked for it this time.
+ */
+async function update(argv) {
+	const checkOnly = argv.indexOf('--check') !== -1 || argv.indexOf('-c') !== -1;
+	const info = updateCheck.installInfo();
+	const current = config.ENGINE_VERSION;
+
+	console.log(paint.bold('MockFlow Bridge') + ' ' + paint.dim('v' + current)
+		+ paint.dim('  ·  ' + ui.shortenPath(info.dir)));
+
+	var latest = '';
+	try {
+		latest = await latestVersion();
+	} catch (e) {
+		console.error(paint.yellow('✗') + ' ' + e.message + ' Check your connection, or update by hand with: '
+			+ paint.teal(updateCheck.command(info)));
+		process.exitCode = 1;
+		return;
+	}
+
+	if (!updateCheck.behind(current, latest)) {
+		console.log(paint.green('✓') + ' Already on the newest published version '
+			+ paint.dim('(npm has v' + latest + ').'));
+		return;
+	}
+
+	console.log(paint.bold('Update available') + ': ' + current + ' → ' + paint.green(latest));
+
+	if (checkOnly) {
+		// userCommand, not the bare `update` line: on a checkout or a root-owned
+		// install this command would only refuse, so name the one that works.
+		console.log('  ' + paint.dim('Install it with:') + ' ' + paint.teal(updateCheck.userCommand(info)));
+		return;
+	}
+
+	if (!info.selfUpdate) {
+		// A checkout, an npx run, or someone else's files: say what to run, do nothing.
+		console.log('  ' + (info.kind === 'source'
+			? 'This is a source checkout, so it is updated with git, not npm.'
+			: info.kind === 'npx'
+				? 'This copy runs from the npx cache, which already fetches the newest version each run.'
+				: 'These files belong to another user, so this command cannot replace them.'));
+		if (info.kind !== 'npx') console.log('  ' + paint.dim('Run:') + ' ' + paint.teal(updateCheck.command(info)));
+		process.exitCode = 1;
+		return;
+	}
+
+	console.log('  ' + paint.dim('Installing ' + config.PKG_NAME + '@' + latest + '…'));
+	const err = await runInstall();
+	if (err) {
+		console.error(paint.yellow('✗') + ' Update failed - ' + err.message);
+		console.error('  ' + paint.dim('Try it by hand:') + ' ' + paint.teal(updateCheck.command(info)));
+		process.exitCode = 1;
+		return;
+	}
+	console.log(paint.green('✓') + ' Updated to ' + paint.bold('v' + latest) + '.');
+	// The running daemon is still the old code in memory, and it is the copy
+	// actually answering the board - saying nothing here reads as "the update did
+	// not take".
+	if (await isRunning()) {
+		console.log('  ' + paint.yellow('A bridge is still running on the old version') + ' - stop it (Ctrl-C)'
+			+ ' and run ' + paint.teal('mockflow-bridge') + ' again.');
+	}
+}
+
+/** The published version, straight from the registry. Rejects when it cannot be read. */
+function latestVersion() {
+	return new Promise(function(resolve, reject) {
+		updateCheck.fetchLatest(function(err, v) {
+			if (err || !v) return reject(err || new Error('Could not reach the npm registry.'));
+			resolve(v);
+		}, true);
+	});
+}
+
+/** Run the install, echoing npm's own output. Resolves with an Error or null. */
+function runInstall() {
+	return new Promise(function(resolve) {
+		updateCheck.install(
+			function(l) { console.log('  ' + paint.dim(l)); },
+			function(e) { resolve(e || null); });
+	});
 }
 
 /* ----------------------------------------------------------------- agent - */
@@ -366,4 +465,4 @@ async function isRunning() {
 	}
 }
 
-module.exports = { help: help, status: status, agent: agent, reset: reset };
+module.exports = { help: help, status: status, agent: agent, reset: reset, update: update };

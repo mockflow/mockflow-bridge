@@ -5,6 +5,7 @@
 ```bash
 npm i -g @mockflow/mockflow-bridge   # install once
 mockflow-bridge                      # start it, every time you want to use it
+mockflow-bridge update               # later on, get the newest version
 ```
 
 Leave that window open, then enter the pairing code it shows in your MockFlow
@@ -79,7 +80,12 @@ npm i -g @mockflow/mockflow-bridge   # once
 mockflow-bridge                      # every time you want to start it
 ```
 
-To update your copy later, run `npm i -g @mockflow/mockflow-bridge` again.
+**Updating it later.** You install once; after that the npm line is not something
+you need to remember. Run `mockflow-bridge update` whenever you want the newest
+version &mdash; it checks npm, and installs only if there is actually something newer.
+Add `--check` to look without installing. The bridge also watches for new versions
+while it runs, so you can just press `u` in its window, or start it with
+`--auto-update` and never think about it again. See [Updating](#updating).
 
 Leave this window open. It stays running and shows a **pairing code** that looks
 like `941027`. If you close the window, the connection stops.
@@ -209,6 +215,7 @@ They differ in small ways (web search, attachments, reading your files). See
 ```bash
 mockflow-bridge           # start it (leave the window open)
 mockflow-bridge status    # is it running, which boards are connected
+mockflow-bridge update    # install the newest version (--check to only look)
 mockflow-bridge agent     # show / change which AI answers
 mockflow-bridge bridgeai  # show / change the BridgeAI provider and model
 mockflow-bridge reset     # clear saved state and start clean
@@ -275,6 +282,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | --- | --- |
 | `mockflow-bridge` | Start the daemon |
 | `mockflow-bridge status` | Running? which agent, which boards |
+| `mockflow-bridge update [--check]` | Install the newest published version; `--check` only reports |
 | `mockflow-bridge agent [id\|pick\|clear]` | Show or change the AI (live-switches a running bridge) |
 | `mockflow-bridge bridgeai [provider\|model] [id]` | Show or change the BridgeAI provider / model |
 | `mockflow-bridge reset [--all] [--yes]` | Delete saved state in `~/.mockflow` |
@@ -300,16 +308,31 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 
 ### Updating
 
-The bridge checks npm for a newer version while it runs. When one exists:
+You install once. After that, pick whichever of these suits you &mdash; you never have
+to retype the npm line:
+
+```bash
+mockflow-bridge update          # check npm and install if there is something newer
+mockflow-bridge update --check  # just tell me, do not install
+```
+
+`update` asks npm directly (not a cached answer), says `Already on the newest
+published version` when there is nothing to do, and prints npm's own output while
+it installs. Run it with the bridge stopped, or stop and restart the bridge
+afterwards &mdash; a running one keeps serving the old version until it is restarted.
+
+The bridge also checks for new versions while it runs, so you do not have to
+remember to look. When one exists:
 
 - Press `u` in the dashboard to install it and restart. Your board stays open and reconnects by itself.
 - Or start with `--auto-update` to have it done unattended.
 
-Either way it waits for any turn in flight to finish first, because a turn is an agent
+Both of those wait for any turn in flight to finish first, because a turn is an agent
 drawing on a live board.
 
-Self-update only works when this copy is an ordinary `npm i -g` that your user can
-write to. Two cases where it is not, and what happens instead:
+All three (the `update` command, `u`, `--auto-update`) only install when this copy is
+an ordinary `npm i -g` that your user can write to. Two cases where it is not, and
+what happens instead:
 
 - **Installed with `sudo`** (root owns the files): the bridge will not escalate on its
   own, so it shows the exact command instead, `sudo npm i -g @mockflow/mockflow-bridge`.
