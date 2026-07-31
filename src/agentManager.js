@@ -127,7 +127,29 @@ function lastErrorLine(stderrTail, max) {
 		.split('\n')
 		.map(function(l) { return l.trim(); })
 		.filter(Boolean);
-	return lines.length ? lines[lines.length - 1].slice(0, max || 200) : '';
+	if (!lines.length) return '';
+	const line = lines[lines.length - 1];
+	// One cause is worth translating rather than forwarding. Every agent CLI keeps
+	// its config under the home directory and cannot start without one, and the
+	// user reading "Error finding codex home: Could not find home directory" inside
+	// Ask Mida has no way to know that is a sentence about how the bridge was
+	// started. _turnEnv now repairs the usual case; this covers the rest.
+	if (/could not find home directory/i.test(line)) {
+		return 'the agent could not find your home directory - start the bridge from an ordinary '
+			+ 'terminal window signed in as yourself, not from a service or a scheduled task';
+	}
+	// The agent died setting itself up, before it could have drawn anything: a
+	// state database it could not open, a sandbox helper it was not allowed to
+	// run. Nothing here is about the board or the prompt, and no amount of
+	// re-prompting will change it, so send the user to the CLI's own diagnostic
+	// instead of leaving them to reword their request. The raw line stays - it is
+	// the only thing that distinguishes one of these from another.
+	if (/failed to initialize (in-process app-server|state runtime|sqlite state runtime)/i.test(line)) {
+		return 'the agent could not start on this machine - ' + line.slice(0, 140)
+			+ ' - this is the agent CLI itself failing, not the board: run it once by hand in a '
+			+ 'terminal, and `codex doctor` if you are on Codex';
+	}
+	return line.slice(0, max || 200);
 }
 
 /** Stop an agent process. On Windows the process is a cmd.exe wrapper, so a
@@ -438,12 +460,31 @@ class AgentManager {
 	 * ignored by the rest, so they are set for all: see AGENT_TOOL_TIMEOUT_MS for
 	 * why the agent must never be the one to give up on a call first. An adapter's
 	 * own env (spec.env) wins, since it knows its CLI better than this does.
+	 *
+	 * HOME is repaired rather than inherited blindly. Every one of these CLIs
+	 * keeps its config under the home directory and refuses to start without one:
+	 * codex exits with "Error finding codex home: Could not find home directory",
+	 * which surfaces in Ask Mida as a board that would not generate. A daemon
+	 * started outside a login shell - a Windows service, a scheduled task, a GUI
+	 * launcher - can have no HOME or USERPROFILE at all, and then every turn dies
+	 * before it runs. os.homedir() does not depend on those being set, and is the
+	 * same lookup config.HOME_DIR already trusts, so hand its answer down.
 	 */
 	_turnEnv(spec) {
-		return Object.assign({}, process.env, {
+		const env = Object.assign({}, process.env, {
 			MCP_TOOL_TIMEOUT: String(config.AGENT_TOOL_TIMEOUT_MS),
 			MCP_TIMEOUT: String(config.AGENT_TOOL_TIMEOUT_MS)
 		}, (spec && spec.env) || {});
+		var home = null;
+		try { home = os.homedir(); } catch (e) {}
+		if (home) {
+			// Only when absent: a user who deliberately points a CLI elsewhere keeps
+			// their setting. CODEX_HOME is deliberately not invented here - pointing
+			// it at a path that does not exist is its own failure.
+			if (!env.HOME) env.HOME = home;
+			if (process.platform === 'win32' && !env.USERPROFILE) env.USERPROFILE = home;
+		}
+		return env;
 	}
 
 	_spawnWithPrompt(spec, delivery, opts) {
