@@ -601,6 +601,21 @@ class AgentManager {
 		return parts.length ? parts.join('. ') + '.' : '';
 	}
 
+	/** Contract sentences catalog entries declare for local-agent turns
+	 *  (`clientFillContract`): a tool whose content the generic turn wording
+	 *  mis-frames (an artifact is a runnable app, not a picture of a design)
+	 *  states its own correction in the catalog, and the engine appends
+	 *  whichever apply - no tool-specific code here. */
+	_toolFillContract(tools) {
+		if (!this.registry || !tools || !tools.length) return '';
+		const parts = [];
+		for (var i = 0; i < tools.length && i < 4; i++) {
+			const entry = this.registry.filter(function(e) { return e.mcpToolName === tools[i]; })[0];
+			if (entry && entry.clientFillContract) parts.push(String(entry.clientFillContract));
+		}
+		return parts.length ? ' ' + parts.join(' ') : '';
+	}
+
 	/**
 	 * Every board tool the catalog defines, by bare MCP name. An adapter whose
 	 * CLI matches allowlist entries literally (opencode) cannot expand
@@ -838,6 +853,7 @@ class AgentManager {
 						+ frame.__declared + ' once.'
 					: ' You already decided this turn draws ' + frame.__declared + ': call that tool now, and no '
 						+ 'other render tool, unless it answers with an error telling you otherwise.');
+			if (frame.__declared !== 'plan') turnInstructions += this._toolFillContract([frame.__declared]);
 		}
 		if (declarePhase) {
 			systemPrompt = PERSONA
@@ -1363,6 +1379,7 @@ class AgentManager {
 		systemPrompt += this._openImageTurn(hub, tab, frame, false);
 		const argHint = this._toolArgHint(tools);
 		if (argHint) systemPrompt += ' ' + argHint;
+		systemPrompt += this._toolFillContract(tools);
 
 		// Real-world/current-data components: let the agent web-research first, but
 		// ALWAYS fall back to its own knowledge if search is off/unavailable/empty -
