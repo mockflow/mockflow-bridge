@@ -1379,7 +1379,10 @@ class AgentManager {
 		systemPrompt += this._openImageTurn(hub, tab, frame, false);
 		const argHint = this._toolArgHint(tools);
 		if (argHint) systemPrompt += ' ' + argHint;
-		systemPrompt += this._toolFillContract(tools);
+		// Only when ONE tool is pinned: a contract paragraph for a specific tool inside
+		// a multi-tool generate turn reads as "use this tool" and skews the election
+		// (observed: "wireframe for a CRM app" drew one wireframelite instead of a plan).
+		if (tools && tools.length === 1) systemPrompt += this._toolFillContract(tools);
 
 		// Real-world/current-data components: let the agent web-research first, but
 		// ALWAYS fall back to its own knowledge if search is off/unavailable/empty -
