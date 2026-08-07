@@ -17,6 +17,11 @@ const election = require('./electionRules');
 
 const PROTOCOL_VERSION = '2025-03-26';
 
+// How many components one turn may open with read_board_component. Mida's own
+// read tool caps at 8 for the same reason; here each read is also a round trip
+// to the user's browser, so an agent walking the board is time the user watches.
+const MAX_COMPONENT_READS_PER_TURN = 8;
+
 // Appended to every successful draw. Without it an agent that still has the
 // component's data in its own context happily re-renders the whole thing to add
 // one branch, which draws a SECOND component instead of editing the first.
@@ -37,8 +42,23 @@ const INSTRUCTIONS =
 	+ '(a plan, workspace, dashboard or kit), call plan_board with the '
 	+ 'component list (each item carrying a self-contained brief) and STOP - the user '
 	+ 'confirms the list on their board and the chosen items are generated and arranged '
-	+ 'automatically, without you. Use read_board to see what is already on the board, '
-	+ 'and list_boards / select_board when several boards are connected. When the user '
+	+ 'automatically, without you. Use read_board to see what is already on the board and '
+	+ 'search_board to find something on a board too big to read whole; either one ALREADY '
+	+ 'answers a question about the board as a whole ("what is on this board", "summarize '
+	+ 'the board") - answer it from that, and do not open the components one by one. '
+	+ 'When the user asks WHERE something is, or wants to find or jump to it, answer with '
+	+ 'show_component_links - clickable cards that take them there - and never with coordinates or ids, '
+	+ 'which they cannot act on and which change as soon as anything moves. '
+	+ 'read_board_component is for a SINGLE component the user is asking about or working '
+	+ 'from: read that one before you quote it, convert it or build something out of it, '
+	+ 'because the board reads shorten each component\'s text. What you could not read, say '
+	+ 'you could not read. '
+	+ 'When the user wants something on the board to become a DIFFERENT kind of component, '
+	+ 'that is convert_component, not a new render: it carries the real content over. '
+	+ 'When the request refers to a real website - its content, its look, or its imagery - '
+	+ 'ground yourself in it with fetch_webpage, extract_website_styles and '
+	+ 'extract_website_images rather than composing from memory. '
+	+ 'Use list_boards / select_board when several boards are connected. When the user '
 	+ 'refers to their own content ("my doc", "my issues", "my tickets"), call '
 	+ 'list_source_tools first: they may have connected Notion, Jira, Slack or GitHub '
 	+ 'to MockFlow, and you can search and fetch that content through the source tools '
@@ -84,12 +104,114 @@ const BRIDGE_TOOLS = [
 	},
 	{
 		name: 'read_board',
-		description: 'Read what is currently on the connected board: every component with its id, type, position and size. Use this to understand existing content before adding to it, or to answer questions about the board.',
+		description: 'Read what is currently on the connected board: every component with its id, type, label, position, size, its text content (including structured content like checklist items or kanban cards), and what it can be converted into (convertTo). This is the whole-board answer - use it to understand what exists before adding to it, and to answer questions about the board itself, without opening the components one by one. text is shortened per component, and textTruncated: true marks one that was cut; when the user then asks about that particular component, read_board_component gives you it in full. On a large board, search_board narrows to what you actually need instead. Base what you render on the content that is actually there, and when you could not read a component, say so rather than inventing the rest.',
 		inputSchema: {
 			type: 'object',
 			properties: {
 				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
 			}
+		}
+	},
+	{
+		name: 'search_board',
+		description: 'grep, over the board. Give it a regular expression and it returns the MATCHING LINES with their line numbers, grouped by component - not the components\' contents. Read-only, instant, free. A component\'s content is made of discrete pieces (a card, a node, a bullet, a cell) and each one is a line here, so a match is a real piece of content you can quote and its cid is what you pass to read_board_component, modify_component or convert_component. With no pattern it lists the board instead (grep vs ls). Use it whenever the user mentions something you have not already read - it may have been placed manually, in an earlier session, or by a collaborator - and NEVER tell the user something is not on the board without searching for it in the SAME turn, because earlier results go stale as they edit. It searches only this board: not icon or shape libraries, and not the web.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				pattern: { type: 'string', description: 'Regular expression to search for (case-insensitive by default). Plain words work and are searched literally when they are not valid regex. Prefer the short distinctive words the user actually used, and remember they describe STRUCTURES loosely - their "flowchart" may be plain notes, so search the content words, not the structure word. Alternation is often the right move: "lite|starter|basic".' },
+				caseSensitive: { type: 'boolean', description: 'Match case exactly. Default false.' },
+				componentType: { type: 'string', description: 'Restrict to one kind of component, like grep\'s --type. A friendly name ("mindmap", "kanban", "wireframe") or a registry key ("MF_MindMap_ID"); matched loosely.' },
+				outputMode: { type: 'string', enum: ['content', 'components', 'count'], description: '"content" (default) returns matching lines with their numbers; "components" returns only which components matched; "count" returns match counts per component. Use content when you need the text, components when you only need to locate something.' },
+				contextLines: { type: 'number', description: 'Lines of context either side of each match, like grep -C. Default 0, max 5.' },
+				headLimit: { type: 'number', description: 'Stop after this many matching lines in total. Default 100.' },
+				includeChildren: { type: 'boolean', description: 'Also search inside wireframe screens and design frames. Default false - their contents are UI fragments ("Submit", "Email") that bury real hits.' },
+				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
+			}
+		}
+	},
+	{
+		name: 'read_board_component',
+		description: 'Read ONE component\'s full current content by its id. Read-only, free, changes nothing. read_board and search_board both shorten each component\'s text, so when the user asks about ONE component - quote it, convert it, build something out of it, answer a question about what is inside it - read that one with this first and use ONLY what it returns, never a nearby component and never a guess. It is for a component you have a reason to open, not a step to run over the board: a question about the board AS A WHOLE is already answered by read_board or search_board, and opening every component to answer it is slow enough that the user watches it happen. Returns the component\'s current data (a kanban\'s columns and cards, a mindmap\'s nodes, a document\'s text, a frame\'s design JSON). A component too large for one read comes back condensed with contentSummarized: true - its structure and figures are intact and its OMITTED line says what was dropped, so answer from it, but do not present it as the component\'s exact wording. Get the id from search_board or read_board. If it comes back truncated or unreadable, say what you could and could not read.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				componentId: { type: 'string', description: 'The component id (cid) from read_board or search_board' },
+				offset: { type: 'number', description: 'Line to start reading from (1-based), for paging through a large component. Its content is made of discrete lines, the same ones search_board reports line numbers for.' },
+				limit: { type: 'number', description: 'How many lines to return. Default 200. The reply states totalLines and hasMore, so page with offset rather than pulling a big component in one go.' },
+				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
+			},
+			required: ['componentId']
+		}
+	},
+	{
+		name: 'show_component_links',
+		description: 'Point the user at components on their board by showing CLICKABLE CARDS in the chat, one per component - clicking one scrolls and zooms their board to it. Call this whenever the user asks WHERE something is, or wants to find, see or jump to a component ("where is the pricing doc?", "show me the mindmaps"), right after search_board gives you the ids. Then tell them to click a card. Never answer a "where is it" question with coordinates or ids: the user cannot use either, positions change the moment anything moves, and the card is the thing that actually takes them there. The card\'s wording comes from the live component, so pass ids and nothing else matters.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				items: {
+					type: 'array',
+					description: 'The components to show cards for, in the order they should appear.',
+					items: {
+						type: 'object',
+						properties: {
+							cid: { type: 'string', description: "The component's cid, exactly as search_board or read_board returned it." }
+						},
+						required: ['cid']
+					}
+				},
+				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
+			},
+			required: ['items']
+		}
+	},
+	{
+		name: 'convert_component',
+		description: 'Turn a component that is already on the board into a DIFFERENT kind of component, keeping its content ("convert this checklist into a mind map", "turn that table into a pie chart"). The new component is generated from the source component\'s real data and drawn beside it, connected to it; the source is left on the board unchanged. Only components read_board reports a convertTo list for can be converted, and the target must be one of the names in that list. This is not modify_component (that edits the same component in place) and not a render_* call (that would invent the content instead of carrying it over). When the component cannot be converted, or the type you want is not one of its targets, read it with read_board_component and render the component you want from that content.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				componentId: { type: 'string', description: 'The component id (cid) of the component to convert, from read_board or search_board' },
+				target: { type: 'string', description: 'What to convert it into - one of the names in that component\'s convertTo list (e.g. "Mind Map")' },
+				instruction: { type: 'string', description: 'Optional extra instruction for the conversion (e.g. "group the items by owner"). The content carries over on its own; this is only for what should change about it.' }
+			},
+			required: ['componentId', 'target']
+		}
+	},
+	// Web grounding. These run on MockFlow, through the user's board tab: the
+	// extractors are the server's own and the fetches are SSRF-guarded there.
+	// None of them costs the user AI credits.
+	{
+		name: 'fetch_webpage',
+		description: 'Read a public webpage and return its readable text (not raw HTML). Use it to ground what you render in a real page: a URL the user pasted, or a site they asked you to refer to. Do NOT use it to pick up a site\'s visual design - extract_website_styles does that - and do not use it for a site\'s images, which is extract_website_images.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				url: { type: 'string', description: 'Full public URL including protocol, e.g. "https://www.redhat.com/en/products"' }
+			},
+			required: ['url']
+		}
+	},
+	{
+		name: 'extract_website_styles',
+		description: 'Visit a public website and extract its visual design system - brand colors, font families, corner radii, shadows and CSS design tokens - as a STYLE GUIDANCE block. Call this whenever the user wants what you draw to match an existing site\'s look ("make it look like stripe.com", "use our brand from acme.com"), then include the returned block VERBATIM inside the prompt or text you pass to the render tool. It returns style values distilled from the site\'s CSS and nothing else: it cannot download a file, a logo or any other asset from the site (extract_website_images lists a site\'s images). If the user asks for something no tool can retrieve, say so plainly - never claim it was extracted and never substitute generated output for it.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				url: { type: 'string', description: 'Full public URL of the site whose styles to extract, e.g. "https://www.stripe.com". The homepage usually carries the brand styles.' }
+			},
+			required: ['url']
+		}
+	},
+	{
+		name: 'extract_website_images',
+		description: 'List the images present on a public webpage (site icons, meta/social images, page images) with their URLs, labels and kind. Call this when the user asks what imagery a site has, or asks you to use a real picture from one. It only lists what is in the page HTML - nothing is downloaded and nothing is generated - so if a site returns none, tell the user truthfully instead of drawing a replacement. The URLs it returns are real, public image URLs: you may use one where a render tool\'s schema accepts a real image URL, but they are not files on the user\'s board, and importing one into their image library is done from MockFlow, not from here.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				url: { type: 'string', description: 'Full public URL of the page whose images to list, e.g. "https://www.miro.com". The homepage usually carries the brand assets.' }
+			},
+			required: ['url']
 		}
 	},
 	{
@@ -483,6 +605,103 @@ class McpEndpoint {
 					const data = await this.hub.runOnBoard(args.projectid || board || null,
 						{ t: 'read', what: 'board' }, config.READ_TIMEOUT_MS);
 					return this._ok(JSON.stringify(data));
+				}
+
+				case 'search_board': {
+					const data = await this.hub.runOnBoard(args.projectid || board || null,
+						{
+							t: 'search',
+							pattern: String(args.pattern || args.query || ''),
+							caseSensitive: args.caseSensitive === true,
+							componentType: String(args.componentType || ''),
+							outputMode: args.outputMode || 'content',
+							contextLines: args.contextLines,
+							headLimit: args.headLimit,
+							includeChildren: args.includeChildren === true
+						}, config.READ_TIMEOUT_MS);
+					// An empty result is an ANSWER, not a failure: the agent asked whether
+					// something is on the board and it is not. Said plainly here so it is
+					// not read as a broken tool and retried.
+					if (data && data.components && data.components.length === 0) {
+						return this._ok('Nothing on this board matches that search. Say so plainly rather than '
+							+ 'assuming the component exists. ' + JSON.stringify(data));
+					}
+					return this._ok(JSON.stringify(data));
+				}
+
+				case 'read_board_component': {
+					if (!args.componentId) {
+						return this._err('read_board_component needs a componentId - call search_board or read_board first.');
+					}
+					// Each read is a round trip to the browser tab, so a turn that walks
+					// the board one component at a time is minutes of "Thinking" with
+					// nothing on screen. grep is what answers those questions.
+					const reads = (typeof this.hub.noteComponentRead === 'function')
+						? this.hub.noteComponentRead(args.projectid || board || null) : 0;
+					if (reads > MAX_COMPONENT_READS_PER_TURN) {
+						return this._err('You have opened ' + (reads - 1) + ' components this turn, which is as many as '
+							+ 'one request gets. Answer from what you have already read, and use search_board (it greps '
+							+ 'the whole board in one call and returns the matching lines) instead of opening components '
+							+ 'one by one.');
+					}
+					const data = await this.hub.runOnBoard(args.projectid || board || null,
+						{
+							t: 'readcomp',
+							cid: String(args.componentId),
+							offset: args.offset,
+							limit: args.limit
+						}, config.READ_COMPONENT_TIMEOUT_MS);
+					return this._ok(JSON.stringify(data));
+				}
+
+				case 'show_component_links': {
+					const items = Array.isArray(args.items) ? args.items.filter(Boolean) : [];
+					if (!items.length) {
+						return this._err('show_component_links needs an items array of component ids (from search_board).');
+					}
+					const shown = await this.hub.runOnBoard(args.projectid || board || null,
+						{ t: 'links', items: items }, config.READ_TIMEOUT_MS);
+					return this._ok(typeof shown === 'string' ? shown : JSON.stringify(shown));
+				}
+
+				case 'convert_component': {
+					if (!args.componentId || !args.target) {
+						return this._err('convert_component needs both componentId (from read_board) and target '
+							+ '(one of that component\'s convertTo names).');
+					}
+					// Like modify_component, the tab owns the component's data and runs the
+					// conversion itself; this only carries the request. surface keeps
+					// anything that turn asks the user in the chat this call came from.
+					const res = await this.hub.runOnBoard(args.projectid || board || null,
+						{
+							t: 'convert',
+							cid: String(args.componentId),
+							target: String(args.target),
+							instruction: String(args.instruction || ''),
+							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(board) : ''
+						},
+						config.HTML_TOOL_TIMEOUT_MS);
+					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
+				}
+
+				// Web grounding, run on MockFlow through the user's tab (see the tool
+				// definitions above). Read-only and free.
+				case 'fetch_webpage':
+				case 'extract_website_styles':
+				case 'extract_website_images': {
+					const url = String(args.url || '').trim();
+					if (!/^https?:\/\//i.test(url)) {
+						return this._err('A full public URL including http:// or https:// is required.');
+					}
+					const op = name === 'fetch_webpage' ? 'fetch'
+						: (name === 'extract_website_styles' ? 'styles' : 'images');
+					const data = await this.hub.runOnBoard(args.projectid || board || null,
+						{ t: 'web', op: op, url: url }, config.WEB_TOOL_TIMEOUT_MS);
+					if (op === 'styles' && data && data.guidance) {
+						return this._ok(data.guidance
+							+ '\n\nInclude this STYLE GUIDANCE block verbatim in the prompt or text you pass to the render tool.');
+					}
+					return this._ok(typeof data === 'string' ? data : JSON.stringify(data));
 				}
 
 				case 'modify_component': {

@@ -112,6 +112,102 @@ ws.on('message', function(raw) {
 				}
 			});
 			return;
+		case 'search':
+			console.log('[fake-tab] SEARCH pattern="' + (frame.pattern || frame.query || '') + '" type="'
+				+ (frame.componentType || '') + '" mode=' + (frame.outputMode || 'content')
+				+ ' children=' + !!frame.includeChildren);
+			// Pattern "__none__" stands in for a board where nothing matches - the
+			// answer an agent must relay instead of assuming the component exists.
+			if ((frame.pattern || frame.query) === '__none__') {
+				send({ t: 'result', id: frame.id, ok: true,
+					data: { projectid: 'testproject123', title: 'Fake Test Board', total: 0, truncated: false, components: [] } });
+				return;
+			}
+			send({
+				t: 'result', id: frame.id, ok: true,
+				data: {
+					projectid: 'testproject123',
+					title: 'Fake Test Board',
+					total: 1,
+					truncated: false,
+					components: [
+						{ cid: 'c1', type: 'MF_Kanban_ID', label: 'Launch Board', x: 100, y: 100, w: 800, h: 500,
+							canModify: true, canConvert: true, convertTargets: ['Mind Map', 'Todo List'],
+							text: 'Backlog | Ship beta | Done', textTruncated: true }
+					]
+				}
+			});
+			return;
+		case 'readcomp':
+			console.log('[fake-tab] READCOMP cid=' + frame.cid);
+			// cid "big" stands in for a component past the read cap, which the real
+			// tab answers with a server-made summary (contentSummarized), and cid
+			// "bigfail" for the summary not coming back (truncation fallback).
+			if (frame.cid === 'big' || frame.cid === 'bigfail') {
+				const summarized = frame.cid === 'big';
+				send({
+					t: 'result', id: frame.id, ok: true,
+					data: {
+						cid: frame.cid,
+						componentType: 'MF_Markdown2_ID',
+						content: summarized
+							? 'Launch Plan. Sections: Goals (3 targets, Q3), Risks (5 listed), Timeline (Aug 1 - Oct 15).\nOMITTED: per-item descriptions.'
+							: 'Launch Plan. Goals... '.repeat(20),
+						contentSummarized: summarized || undefined,
+						contentTruncated: summarized ? undefined : true,
+						note: summarized
+							? 'Content was too large for a full read; this is a structure-preserving summary (its OMITTED line says what was condensed).'
+							: 'This component is larger than one read returns and could not be condensed, so the tail is missing.'
+					}
+				});
+				return;
+			}
+			send({
+				t: 'result', id: frame.id, ok: true,
+				data: {
+					cid: frame.cid,
+					componentType: 'MF_Kanban_ID',
+					content: 'Kanban "Launch Board". Columns: Backlog (Ship beta, Write docs), Doing (Fix login), Done (Pick name).'
+				}
+			});
+			return;
+		case 'convert':
+			console.log('[fake-tab] CONVERT cid=' + frame.cid + ' -> "' + frame.target + '"'
+				+ (frame.instruction ? ' instruction="' + frame.instruction + '"' : ''));
+			send({ t: 'result', id: frame.id, ok: true,
+				data: 'Converted the Kanban into a ' + frame.target + '. It is on the user\'s board, beside the original.' });
+			return;
+		case 'links':
+			console.log('[fake-tab] LINKS ' + (frame.items || []).map(function(i) { return i.cid; }).join(', '));
+			// The real tab drops ids that are not on the board and builds each card's
+			// wording from the live component; c1/c2 exist here, anything else does not.
+			var known = (frame.items || []).filter(function(i) { return i && (i.cid === 'c1' || i.cid === 'c2'); });
+			if (!known.length) {
+				send({ t: 'result', id: frame.id, ok: false, error: 'None of those components are on this board.' });
+				return;
+			}
+			send({ t: 'result', id: frame.id, ok: true,
+				data: 'Showed ' + known.length + ' clickable card(s) in the chat. Tell the user to click one; never quote coordinates or ids.' });
+			return;
+		case 'web':
+			console.log('[fake-tab] WEB ' + frame.op + ' ' + frame.url);
+			if (frame.op === 'styles') {
+				send({ t: 'result', id: frame.id, ok: true, data: {
+					site: 'Example', finalUrl: frame.url,
+					guidance: 'STYLE GUIDANCE (extracted from ' + frame.url + ' — Example):\n- Color palette (most used first): #0a2540, #635bff\n- Font families (most used first): Sohne'
+				} });
+			} else if (frame.op === 'images') {
+				send({ t: 'result', id: frame.id, ok: true, data: {
+					site: 'Example', finalUrl: frame.url,
+					images: [{ url: frame.url + '/logo.svg', label: 'Example logo', kind: 'logo' }]
+				} });
+			} else {
+				send({ t: 'result', id: frame.id, ok: true, data: {
+					title: 'Example', finalUrl: frame.url, truncated: false,
+					text: 'Example page text used for grounding.'
+				} });
+			}
+			return;
 		case 'layout':
 			console.log('[fake-tab] LAYOUT "' + frame.boardTitle + '"');
 			send({ t: 'result', id: frame.id, ok: true, data: 2 });

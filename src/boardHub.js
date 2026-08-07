@@ -58,6 +58,11 @@ class BoardHub {
 		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.turnModes = new Map();    // projectid -> 'create' | 'modify' (imagery rules differ)
 		this.turnPhases = new Map();   // projectid -> 'declare' | 'compose' (decide-then-draw)
+		// projectid -> how many components this turn has opened with
+		// read_board_component. Each one is a round trip to the browser tab, so an
+		// agent that reads the whole board one component at a time leaves the user
+		// watching "Thinking" for minutes. Reset when a turn opens (setImageChoice).
+		this.componentReads = new Map();
 		this.turnRequests = new Map(); // projectid -> the user's OWN words for this turn
 		this.selectedProjectId = null;
 		this.nextId = 1;
@@ -1032,6 +1037,24 @@ class BoardHub {
 		// instructions about imagery, so the turn's kind travels with the choice.
 		if (turnMode === 'modify') this.turnModes.set(key, 'modify');
 		else this.turnModes.delete(key);
+		// A new turn starts with a fresh read budget (see componentReads).
+		this.componentReads.delete(key);
+	}
+
+	/**
+	 * Count one read_board_component for this turn and return the running total.
+	 *
+	 * The budget is per TURN, not per board: reading five components to answer a
+	 * question is legitimate, reading forty one at a time is an agent walking the
+	 * board instead of using read_board, and each of those is a browser round trip
+	 * the user waits through.
+	 */
+	noteComponentRead(projectid) {
+		const key = projectid || null;
+		if (!key) return 0;
+		const n = (this.componentReads.get(key) || 0) + 1;
+		this.componentReads.set(key, n);
+		return n;
 	}
 
 	/**

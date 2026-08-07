@@ -119,6 +119,17 @@ module.exports = {
 	// the ones that decide when a call has really failed.
 	AGENT_TOOL_TIMEOUT_MS: 600000,
 	READ_TIMEOUT_MS: 20000,
+	// read_board_component: a component past the read cap is condensed by MockFlow
+	// (a small model call in the tab's server round trip) instead of being cut off,
+	// so this one read can legitimately outlast a plain board read. The tab gives
+	// up on the summary at 45s and answers with the truncated content, so this only
+	// has to stay clear of that.
+	READ_COMPONENT_TIMEOUT_MS: 90000,
+	// Web grounding (fetch_webpage / extract_website_styles /
+	// extract_website_images): the tab relays to MockFlow, which fetches the site
+	// itself - and a style extraction fans out to several stylesheet downloads on
+	// top of the page, so it is slower than a board read.
+	WEB_TOOL_TIMEOUT_MS: 60000,
 	// Connected-source calls (list_source_tools / call_source_tool): the tab
 	// relays to MockFlow, which runs the third-party API call (Notion, Jira,
 	// Composio), so these are slower than a board read but never as slow as a
