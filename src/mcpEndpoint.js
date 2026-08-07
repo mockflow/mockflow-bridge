@@ -114,11 +114,11 @@ const BRIDGE_TOOLS = [
 	},
 	{
 		name: 'search_board',
-		description: 'grep, over the board. Give it a regular expression and it returns the MATCHING LINES with their line numbers, grouped by component - not the components\' contents. Read-only, instant, free. A component\'s content is made of discrete pieces (a card, a node, a bullet, a cell) and each one is a line here, so a match is a real piece of content you can quote and its cid is what you pass to read_board_component, modify_component or convert_component. With no pattern it lists the board instead (grep vs ls). Use it whenever the user mentions something you have not already read - it may have been placed manually, in an earlier session, or by a collaborator - and NEVER tell the user something is not on the board without searching for it in the SAME turn, because earlier results go stale as they edit. It searches only this board: not icon or shape libraries, and not the web.',
+		description: 'grep, over the board. Give it a regular expression and it returns the MATCHING LINES with their line numbers, grouped by component - not the components\' contents. Read-only, instant, free. A component\'s content is made of discrete pieces (a card, a node, a bullet, a cell) and each one is a line here, so a match is a real piece of content you can quote and its cid is what you pass to read_board_component, modify_component or convert_component. Results come back MOST RELEVANT FIRST, and labelMatch: true marks a component whose own name/title matches the pattern - a label match is IDENTITY, a content match is a mention, so when the user singled out one of several same-type components by name, the labelMatch record is the one they mean, not the record with the most content hits. With no pattern it lists the board instead (grep vs ls). Use it whenever the user mentions something you have not already read - it may have been placed manually, in an earlier session, or by a collaborator - and NEVER tell the user something is not on the board without searching for it in the SAME turn, because earlier results go stale as they edit. It searches only this board: not icon or shape libraries, and not the web.',
 		inputSchema: {
 			type: 'object',
 			properties: {
-				pattern: { type: 'string', description: 'Regular expression to search for (case-insensitive by default). Plain words work and are searched literally when they are not valid regex. Prefer the short distinctive words the user actually used, and remember they describe STRUCTURES loosely - their "flowchart" may be plain notes, so search the content words, not the structure word. Alternation is often the right move: "lite|starter|basic".' },
+				pattern: { type: 'string', description: 'Regular expression to search for (case-insensitive by default). Plain words work and are searched literally when they are not valid regex. Prefer the short distinctive words the user actually used, and remember they describe STRUCTURES loosely - their "flowchart" may be plain notes, so search the content words, not the structure word. Alternation is for VARIANT WORDINGS of one thing ("sign ?up|register") - do NOT split the user\'s distinguishing phrase into alternated words ("basic|plan" matches everything that mentions either word; "basic plan" finds the one they named).' },
 				caseSensitive: { type: 'boolean', description: 'Match case exactly. Default false.' },
 				componentType: { type: 'string', description: 'Restrict to one kind of component, like grep\'s --type. A friendly name ("mindmap", "kanban", "wireframe") or a registry key ("MF_MindMap_ID"); matched loosely.' },
 				outputMode: { type: 'string', enum: ['content', 'components', 'count'], description: '"content" (default) returns matching lines with their numbers; "components" returns only which components matched; "count" returns match counts per component. Use content when you need the text, components when you only need to locate something.' },
@@ -131,7 +131,7 @@ const BRIDGE_TOOLS = [
 	},
 	{
 		name: 'read_board_component',
-		description: 'Read ONE component\'s full current content by its id. Read-only, free, changes nothing. read_board and search_board both shorten each component\'s text, so when the user asks about ONE component - quote it, convert it, build something out of it, answer a question about what is inside it - read that one with this first and use ONLY what it returns, never a nearby component and never a guess. It is for a component you have a reason to open, not a step to run over the board: a question about the board AS A WHOLE is already answered by read_board or search_board, and opening every component to answer it is slow enough that the user watches it happen. Returns the component\'s current data (a kanban\'s columns and cards, a mindmap\'s nodes, a document\'s text, a frame\'s design JSON). A component too large for one read comes back condensed with contentSummarized: true - its structure and figures are intact and its OMITTED line says what was dropped, so answer from it, but do not present it as the component\'s exact wording. Get the id from search_board or read_board. If it comes back truncated or unreadable, say what you could and could not read.',
+		description: 'Read ONE component\'s full current content by its id. Read-only, free, changes nothing. Before acting on what it returns, confirm this is the component the user MEANT: when they singled one out by name ("the basic plan checklist"), its label or content must actually contain their distinguishing words - a component that merely mentions them is not it; if it does not match, search again with those words instead of proceeding on a near miss. read_board and search_board both shorten each component\'s text, so when the user asks about ONE component - quote it, convert it, build something out of it, answer a question about what is inside it - read that one with this first and use ONLY what it returns, never a nearby component and never a guess. It is for a component you have a reason to open, not a step to run over the board: a question about the board AS A WHOLE is already answered by read_board or search_board, and opening every component to answer it is slow enough that the user watches it happen. Returns the component\'s current data (a kanban\'s columns and cards, a mindmap\'s nodes, a document\'s text, a frame\'s design JSON). A component too large for one read comes back condensed with contentSummarized: true - its structure and figures are intact and its OMITTED line says what was dropped, so answer from it, but do not present it as the component\'s exact wording. Get the id from search_board or read_board. If it comes back truncated or unreadable, say what you could and could not read.',
 		inputSchema: {
 			type: 'object',
 			properties: {
@@ -171,9 +171,10 @@ const BRIDGE_TOOLS = [
 		inputSchema: {
 			type: 'object',
 			properties: {
-				componentId: { type: 'string', description: 'The component id (cid) of the component to convert, from read_board or search_board' },
+				componentId: { type: 'string', description: 'The component id (cid) of the component to convert, from read_board or search_board. When the user named one of several same-type components, this must be the one whose label/title matches their words - verify with read_board_component first if unsure, and never convert a near miss.' },
 				target: { type: 'string', description: 'What to convert it into - one of the names in that component\'s convertTo list (e.g. "Mind Map")' },
-				instruction: { type: 'string', description: 'Optional extra instruction for the conversion (e.g. "group the items by owner"). The content carries over on its own; this is only for what should change about it.' }
+				instruction: { type: 'string', description: 'Optional extra instruction for the conversion (e.g. "group the items by owner"). The content carries over on its own; this is only for what should change about it.' },
+				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
 			},
 			required: ['componentId', 'target']
 		}
@@ -608,7 +609,8 @@ class McpEndpoint {
 				}
 
 				case 'search_board': {
-					const data = await this.hub.runOnBoard(args.projectid || board || null,
+					const target = args.projectid || board || null;
+					const data = await this.hub.runOnBoard(target,
 						{
 							t: 'search',
 							pattern: String(args.pattern || args.query || ''),
@@ -626,6 +628,18 @@ class McpEndpoint {
 						return this._ok('Nothing on this board matches that search. Say so plainly rather than '
 							+ 'assuming the component exists. ' + JSON.stringify(data));
 					}
+					// Feed the rolling turn transcript: which components this search
+					// surfaced is exactly what a next-turn "convert it" resolves against.
+					if (data && Array.isArray(data.components) && data.components.length
+						&& typeof this.hub.noteTurnEvent === 'function') {
+						const top = data.components.slice(0, 3)
+							.map(function(c) { return '"' + (c.label || c.type) + '" (cid ' + c.cid + ')'; })
+							.join(', ');
+						this.hub.noteTurnEvent(target, 'search_board'
+							+ (args.pattern ? ' for "' + String(args.pattern).slice(0, 60) + '"' : '')
+							+ ' found: ' + top
+							+ (data.components.length > 3 ? ' and ' + (data.components.length - 3) + ' more' : ''));
+					}
 					return this._ok(JSON.stringify(data));
 				}
 
@@ -635,22 +649,29 @@ class McpEndpoint {
 					}
 					// Each read is a round trip to the browser tab, so a turn that walks
 					// the board one component at a time is minutes of "Thinking" with
-					// nothing on screen. grep is what answers those questions.
-					const reads = (typeof this.hub.noteComponentRead === 'function')
-						? this.hub.noteComponentRead(args.projectid || board || null) : 0;
-					if (reads > MAX_COMPONENT_READS_PER_TURN) {
-						return this._err('You have opened ' + (reads - 1) + ' components this turn, which is as many as '
+					// nothing on screen. grep is what answers those questions. The count
+					// is checked BEFORE recording so refused calls do not inflate it.
+					const rtarget = args.projectid || board || null;
+					const reads = (typeof this.hub.peekComponentReads === 'function')
+						? this.hub.peekComponentReads(rtarget) : 0;
+					if (reads >= MAX_COMPONENT_READS_PER_TURN) {
+						return this._err('You have opened ' + reads + ' components this turn, which is as many as '
 							+ 'one request gets. Answer from what you have already read, and use search_board (it greps '
 							+ 'the whole board in one call and returns the matching lines) instead of opening components '
 							+ 'one by one.');
 					}
-					const data = await this.hub.runOnBoard(args.projectid || board || null,
+					if (typeof this.hub.recordComponentRead === 'function') this.hub.recordComponentRead(rtarget);
+					const data = await this.hub.runOnBoard(rtarget,
 						{
 							t: 'readcomp',
 							cid: String(args.componentId),
 							offset: args.offset,
 							limit: args.limit
 						}, config.READ_COMPONENT_TIMEOUT_MS);
+					if (data && (data.label || data.componentType) && typeof this.hub.noteTurnEvent === 'function') {
+						this.hub.noteTurnEvent(rtarget, 'read_board_component ' + String(args.componentId)
+							+ ' -> ' + (data.label ? '"' + data.label + '"' : data.componentType));
+					}
 					return this._ok(JSON.stringify(data));
 				}
 
@@ -659,8 +680,13 @@ class McpEndpoint {
 					if (!items.length) {
 						return this._err('show_component_links needs an items array of component ids (from search_board).');
 					}
-					const shown = await this.hub.runOnBoard(args.projectid || board || null,
+					const ltarget = args.projectid || board || null;
+					const shown = await this.hub.runOnBoard(ltarget,
 						{ t: 'links', items: items }, config.READ_TIMEOUT_MS);
+					if (typeof this.hub.noteTurnEvent === 'function') {
+						this.hub.noteTurnEvent(ltarget, 'show_component_links showed cards for cid '
+							+ items.map(function(it) { return it.cid; }).join(', cid '));
+					}
 					return this._ok(typeof shown === 'string' ? shown : JSON.stringify(shown));
 				}
 
@@ -672,15 +698,32 @@ class McpEndpoint {
 					// Like modify_component, the tab owns the component's data and runs the
 					// conversion itself; this only carries the request. surface keeps
 					// anything that turn asks the user in the chat this call came from.
-					const res = await this.hub.runOnBoard(args.projectid || board || null,
+					// Unqueued on purpose: the tab answers this by running a component AI
+					// turn whose agent then calls a render tool, and that render has to
+					// reach the same tab while this frame is still open. Through the
+					// per-board queue the two wait on each other until the timeout (see
+					// runOnBoardUnqueued). modify_component does not have this problem -
+					// its result is a fill routed back through the armed capture.
+					const runConvert = (typeof this.hub.runOnBoardUnqueued === 'function')
+						? this.hub.runOnBoardUnqueued.bind(this.hub)
+						: this.hub.runOnBoard.bind(this.hub);
+					// The surface lookup keys on the TARGET board: an explicit-projectid
+					// convert must ask its questions on the board being converted, not on
+					// this connection's default board.
+					const ctarget = args.projectid || board || null;
+					const res = await runConvert(ctarget,
 						{
 							t: 'convert',
 							cid: String(args.componentId),
 							target: String(args.target),
 							instruction: String(args.instruction || ''),
-							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(board) : ''
+							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(ctarget) : ''
 						},
 						config.HTML_TOOL_TIMEOUT_MS);
+					if (typeof this.hub.noteTurnEvent === 'function') {
+						this.hub.noteTurnEvent(ctarget, 'convert_component ' + String(args.componentId)
+							+ ' -> ' + String(args.target));
+					}
 					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
 				}
 
@@ -715,14 +758,19 @@ class McpEndpoint {
 					// own, and anything that turn asks the user must be asked where THIS
 					// turn is being read - the Concept Builder that called the tool, not
 					// whatever a turn with no surface of its own falls back to.
-					const res = await this.hub.runOnBoard(args.projectid || board || null,
+					const mtarget = args.projectid || board || null;
+					const res = await this.hub.runOnBoard(mtarget,
 						{
 							t: 'modify',
 							cid: String(args.componentId),
 							instruction: String(args.instruction),
-							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(board) : ''
+							surface: (typeof this.hub.getTurnSurface === 'function') ? this.hub.getTurnSurface(mtarget) : ''
 						},
 						config.HTML_TOOL_TIMEOUT_MS);
+					if (typeof this.hub.noteTurnEvent === 'function') {
+						this.hub.noteTurnEvent(mtarget, 'modify_component ' + String(args.componentId)
+							+ ': ' + String(args.instruction).slice(0, 80));
+					}
 					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
 				}
 

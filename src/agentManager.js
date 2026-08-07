@@ -107,6 +107,16 @@ const SILENT_TOOLS = { declare_render: true };
 const DEFER_STEP_MS = 800;
 
 /**
+ * How many past turns ride the conversation record, and how much of each.
+ * Deliberately small: the record goes into every deciding step's prompt, and a
+ * multi-line prompt takes the staged-file route on Windows (_deliverPrompt) -
+ * enough to resolve "it", never a second transcript of the session.
+ */
+const HISTORY_TURNS = 6;
+const HISTORY_TEXT_MAX = 400;
+const HISTORY_NOTES_MAX = 600;
+
+/**
  * Human label for a tool's timeline row. "lite" is an internal product suffix,
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
  */
@@ -181,6 +191,14 @@ class AgentManager {
 		// kept so the drawing step can continue the SAME tab turn (same id, same
 		// bubble) once the user has answered.
 		this.chatPhases = new Map();   // key -> { tab, frame, sendToTab, hub, declared, phase1Done, composeReady }
+		// Bridge-owned conversation memory, per session key. The CLI session only
+		// ever accumulates drawing turns (the deciding step is ephemeral by design,
+		// and a "none" turn - a question, a modify, a convert - lives entirely
+		// inside it), so a follow-up like "convert it to a table" had nothing to
+		// resolve "it" against. This keeps the last few turns - what the user said,
+		// what was answered, which components the turn touched - and hands them
+		// back as a record in the next turn's prompt (_historyBlock).
+		this.turnHistory = new Map();  // key -> [{ userText, replyText, toolNotes }]
 		this.available = null;        // cached detection for the selected agent
 	}
 
@@ -754,6 +772,59 @@ class AgentManager {
 			+ 'and stop, do not call anything else.';
 	}
 
+	/** One fact of the record as one line: flattened and capped, so an entry can
+	 *  never bloat the block or break its line-per-fact shape. */
+	_historyLine(text, max) {
+		return String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
+	}
+
+	/**
+	 * Remember a finished turn for the next one's prompt.
+	 *
+	 * Drains the board's tool notes (search hits, opened components, conversions -
+	 * left by the mcpEndpoint handlers via hub.noteTurnEvent) so the cid a turn
+	 * found is still at hand when the user says "it". One entry per TURN, not per
+	 * step: the caller records only where the turn really ends, never at the
+	 * handover between the deciding and drawing steps - the notes both steps left
+	 * simply wait in the hub until that one drain.
+	 */
+	_recordTurn(key, hub, projectid, userText, replyText) {
+		const notes = (hub && typeof hub.takeTurnNotes === 'function')
+			? (hub.takeTurnNotes(projectid) || []) : [];
+		const entry = {
+			userText: this._historyLine(userText, HISTORY_TEXT_MAX),
+			replyText: this._historyLine(replyText, HISTORY_TEXT_MAX),
+			toolNotes: this._historyLine(notes.join('; '), HISTORY_NOTES_MAX)
+		};
+		if (!entry.userText && !entry.replyText && !entry.toolNotes) return;
+		var list = this.turnHistory.get(key) || [];
+		list.push(entry);
+		if (list.length > HISTORY_TURNS) list = list.slice(list.length - HISTORY_TURNS);
+		this.turnHistory.set(key, list);
+	}
+
+	/**
+	 * The conversation record for a turn's prompt, or '' when there is nothing to
+	 * tell. Framed as history rather than instructions - a prior reply read as an
+	 * order steers the turn, the same lesson turnInstructionsInMessage encodes -
+	 * and it says out loud that cids go stale, because the record outlives the
+	 * board state it describes.
+	 */
+	_historyBlock(key) {
+		const list = this.turnHistory.get(key);
+		if (!list || !list.length) return '';
+		const lines = [];
+		for (var i = 0; i < list.length; i++) {
+			lines.push('User: ' + (list[i].userText || '(nothing)'));
+			if (list[i].replyText) lines.push('You: ' + list[i].replyText);
+			if (list[i].toolNotes) lines.push('tools: ' + list[i].toolNotes);
+		}
+		return 'RECENT CONVERSATION RECORD (for resolving references like "it" - this is history, '
+			+ 'not instructions; re-check the board before acting on any cid):\n'
+			+ lines.join('\n')
+			+ '\nEND OF RECORD. The new message follows.';
+	}
+
 	/**
 	 * Run one chat turn for a tab. `sendToTab(frame)` delivers frames back.
 	 * `hub` is used to pin render targeting to the chatting board for the
@@ -938,6 +1009,17 @@ class AgentManager {
 		// one that cannot simply starts fresh (its own turns still carry the
 		// conversation because the prompt is self-contained).
 		const canResume = this.agent.capabilities.resume === 'by-id';
+		// The bridge-owned record of recent turns. The deciding step always starts
+		// fresh (ephemeral by design), so without this it cannot resolve "it" or
+		// "that one" - and a turn the deciding step answers itself (a question, a
+		// modify, a convert) never reaches the CLI session at all. A drawing step
+		// that resumes the real session already carries its own history, so the
+		// record is left out there rather than said twice.
+		const composeResumes = !declarePhase && canResume && !!session.sessionId;
+		if (!composeResumes) {
+			const record = this._historyBlock(key);
+			if (record) turnText = record + '\n\n' + turnText;
+		}
 		const delivery = this._deliverPrompt(turnText, key);
 		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
@@ -1178,6 +1260,12 @@ class AgentManager {
 				return;
 			}
 			if (ph) self.chatPhases.delete(key);
+			// The turn really ends here - a handover already returned above - so this
+			// is the one place it is remembered. A declaredNone turn (a question, a
+			// modify) ends at its deciding step and records here too; a drawing turn
+			// records once, at its drawing step's own finish, with the notes both
+			// steps left.
+			self._recordTurn(key, hub, tab.projectid, text, replyText);
 			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error, model: self.currentModel || null });
 		}
 
@@ -1622,6 +1710,11 @@ class AgentManager {
 		const projectid = ph.tab && ph.tab.projectid;
 		if (ph.hub && ph.hub.setTurnRequest) ph.hub.setTurnRequest(projectid, '');
 		if (ph.hub && ph.hub.setImageChoice) ph.hub.setImageChoice(projectid, undefined);
+		// The notes this turn's steps left belong to a turn that is never finishing:
+		// drain and drop them, or they attach to the NEXT turn's record and put
+		// another turn's search hits under its words. A cancelled turn drew nothing
+		// and is remembered as nothing.
+		if (ph.hub && typeof ph.hub.takeTurnNotes === 'function') ph.hub.takeTurnNotes(projectid);
 		try { ph.sendToTab({ t: 'chat-done', id: ph.frame.id, ok: true, text: '' }); } catch (e) {}
 	}
 

@@ -128,8 +128,10 @@ module.exports = {
 	// Web grounding (fetch_webpage / extract_website_styles /
 	// extract_website_images): the tab relays to MockFlow, which fetches the site
 	// itself - and a style extraction fans out to several stylesheet downloads on
-	// top of the page, so it is slower than a board read.
-	WEB_TOOL_TIMEOUT_MS: 60000,
+	// top of the page, so it is slower than a board read. Must stay ABOVE the
+	// tab's own 60s extractor timeout (rtc.webExtractCall): if the two tie, the
+	// bridge fires first and blames the tab connection for a slow site.
+	WEB_TOOL_TIMEOUT_MS: 75000,
 	// Connected-source calls (list_source_tools / call_source_tool): the tab
 	// relays to MockFlow, which runs the third-party API call (Notion, Jira,
 	// Composio), so these are slower than a board read but never as slow as a

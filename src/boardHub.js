@@ -43,6 +43,10 @@ const fs = require('fs');
 const { WebSocketServer } = require('ws');
 const config = require('./config');
 
+// A quiet spell this long between component reads counts as a turn boundary
+// for clients whose turns the hub cannot see (external MCP sessions).
+const READ_BUDGET_WINDOW_MS = 3 * 60 * 1000;
+
 class BoardHub {
 	constructor(opts) {
 		this.log = (opts && opts.log) || function() {};
@@ -58,11 +62,20 @@ class BoardHub {
 		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.turnModes = new Map();    // projectid -> 'create' | 'modify' (imagery rules differ)
 		this.turnPhases = new Map();   // projectid -> 'declare' | 'compose' (decide-then-draw)
-		// projectid -> how many components this turn has opened with
-		// read_board_component. Each one is a round trip to the browser tab, so an
-		// agent that reads the whole board one component at a time leaves the user
-		// watching "Thinking" for minutes. Reset when a turn opens (setImageChoice).
+		// projectid -> { n, last } - how many components this turn has opened with
+		// read_board_component, and when the last read happened. Each read is a
+		// round trip to the browser tab, so an agent that reads the whole board one
+		// component at a time leaves the user watching "Thinking" for minutes.
+		// Reset when a tab-driven turn opens (setImageChoice); external MCP clients
+		// have no visible turn boundary, so a quiet spell (READ_BUDGET_WINDOW_MS)
+		// counts as one - without that, a scoped external session would hit the cap
+		// once and then be locked out of reads forever.
 		this.componentReads = new Map();
+		// projectid -> compact notes of what this turn's board tools did ("found
+		// 'Basic Plan Features' (cid abc)"), collected by the MCP endpoint and
+		// drained by the agent manager into the rolling turn transcript - the datum
+		// a next-turn "convert it" needs to resolve "it".
+		this.turnNotes = new Map();
 		this.turnRequests = new Map(); // projectid -> the user's OWN words for this turn
 		this.selectedProjectId = null;
 		this.nextId = 1;
@@ -165,6 +178,12 @@ class BoardHub {
 			self.tabs.delete(ws);
 			if (tab.registered) {
 				self.log('Board disconnected: "' + (tab.title || tab.projectid) + '"');
+				// Per-turn scratch for this board dies with its tab (worst case a
+				// reconnect starts with a fresh read budget, which is harmless).
+				if (tab.projectid) {
+					self.componentReads.delete(tab.projectid);
+					self.turnNotes.delete(tab.projectid);
+				}
 			}
 			// Files the user attached during this board's session were saved on
 			// their machine for follow-up questions; the session is over now.
@@ -1042,19 +1061,55 @@ class BoardHub {
 	}
 
 	/**
-	 * Count one read_board_component for this turn and return the running total.
+	 * Count one read_board_component for this turn and return the running total,
+	 * WITHOUT recording it yet - the caller decides (recordComponentRead) so a
+	 * refused call does not inflate the count it reports.
 	 *
 	 * The budget is per TURN, not per board: reading five components to answer a
 	 * question is legitimate, reading forty one at a time is an agent walking the
 	 * board instead of using read_board, and each of those is a browser round trip
-	 * the user waits through.
+	 * the user waits through. Turns the hub cannot see (external MCP clients) are
+	 * bounded by a rolling quiet-window instead: no reads for a while means the
+	 * old turn is over.
 	 */
-	noteComponentRead(projectid) {
-		const key = projectid || null;
-		if (!key) return 0;
-		const n = (this.componentReads.get(key) || 0) + 1;
-		this.componentReads.set(key, n);
+	peekComponentReads(projectid) {
+		const key = projectid || this.selectedProjectId || 'external';
+		const entry = this.componentReads.get(key);
+		if (!entry) return 0;
+		if (Date.now() - entry.last > READ_BUDGET_WINDOW_MS) {
+			this.componentReads.delete(key);
+			return 0;
+		}
+		return entry.n;
+	}
+
+	recordComponentRead(projectid) {
+		const key = projectid || this.selectedProjectId || 'external';
+		const n = this.peekComponentReads(projectid) + 1;
+		this.componentReads.set(key, { n: n, last: Date.now() });
 		return n;
+	}
+
+	/**
+	 * Append one compact line to this turn's tool notes (see turnNotes above) and
+	 * cap them: the notes feed a prompt, not a log.
+	 */
+	noteTurnEvent(projectid, line) {
+		const key = projectid || this.selectedProjectId || null;
+		if (!key || !line) return;
+		const notes = this.turnNotes.get(key) || [];
+		if (notes.length >= 12) return;
+		notes.push(String(line).slice(0, 300));
+		this.turnNotes.set(key, notes);
+	}
+
+	/** Drain this turn's tool notes (returns [] when there are none). */
+	takeTurnNotes(projectid) {
+		const key = projectid || this.selectedProjectId || null;
+		if (!key) return [];
+		const notes = this.turnNotes.get(key) || [];
+		this.turnNotes.delete(key);
+		return notes;
 	}
 
 	/**
@@ -1306,6 +1361,23 @@ class BoardHub {
 			if (self.queues.get(key) === run) self.queues.delete(key);
 		}).catch(function() {});
 		return run;
+	}
+
+	/**
+	 * Run a frame on a board WITHOUT taking the per-board queue.
+	 *
+	 * runOnBoard serializes frames per board, which is right for anything that
+	 * simply asks the tab a question. It is wrong for a frame whose ANSWER depends
+	 * on further frames reaching the same tab: the tab starts a component AI turn,
+	 * that turn's agent calls a render tool, the render queues behind the frame
+	 * that started it, and neither can finish. Convert is exactly that shape (its
+	 * draw is a separate render call, not a fill routed through a capture), so it
+	 * goes straight to the tab - the same reason startPlanPick sends its picker
+	 * directly.
+	 */
+	runOnBoardUnqueued(projectid, frame, timeoutMs) {
+		const target = this._targetTab(projectid || null);
+		return this._request(target.ws, frame, timeoutMs || config.TOOL_TIMEOUT_MS);
 	}
 
 	_request(ws, frame, timeoutMs) {
