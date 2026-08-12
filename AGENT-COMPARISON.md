@@ -14,7 +14,7 @@ runner rather than an external CLI, so what it can do depends on the model and
 provider you point it at.
 
 Everything about the three apps was checked against these versions: Claude Code
-2.1.216, Codex 0.145.0, opencode 1.18.4.
+2.1.226, Codex 0.145.0, opencode 1.18.4.
 
 Only CLIs that have been run end to end against a real board are supported - see
 [How support is added](#how-support-is-added) at the end.

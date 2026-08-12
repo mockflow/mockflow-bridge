@@ -921,6 +921,14 @@ class AgentManager {
 			turnInstructions += (frame.__declared === 'plan')
 				? ' You already decided this turn needs SEVERAL DIFFERENT components: call plan_board now '
 					+ 'with the component list and stop, and draw nothing yourself.'
+					// Each item is generated later, from its brief alone - the file is not
+					// there any more. A brief that only points back at it ("the facts from
+					// the attached document") produces a generic component.
+					+ (frame.attachment
+						? ' Each item\'s brief is generated later without the attached file and without this '
+							+ 'conversation, so read the file and write the content it contributes - the names, '
+							+ 'figures, steps and wording it actually holds - into the brief itself.'
+						: '')
 				// A corrected choice is NOT pinned the same way: the component that was
 				// asked for may have been the one that carries a whole product in a single
 				// call, while the one it is held to carries a single screen. So the type is
@@ -945,6 +953,23 @@ class AgentManager {
 				+ 'again, that is still this step: read it, decide again and call declare_render once more - '
 				+ 'nothing has failed and nothing has been drawn. When your choice is accepted, write NO reply '
 				+ 'text at all: the drawing step follows immediately and speaks to the user itself.';
+			// An attached file is the turn's real request; the line the user typed next to
+			// it ("visualize this") says nothing about how much is in it. Deciding from
+			// that line alone is what made an attachment always come back as one
+			// component, while the same file sent to MockFlow AI - which classifies the
+			// document's own text - comes back as a plan.
+			// Not a whiteboard photo: that one is a transcription of a single surface
+			// (MockFlow AI sends it to its own single-board generator), so it must not
+			// be talked into a batch here.
+			if (frame.attachment && frame.attachment.kind !== 'whiteboard') {
+				systemPrompt += ' This turn carries a file the user attached, and reading it IS part of '
+					+ 'deciding: open it before you call declare_render. How many components the request '
+					+ 'needs follows from what is actually in the file, not from the short line the user '
+					+ 'sent with it. A source document handed over to be visualized, where the user names '
+					+ 'no particular artifact they want out of it, covers several distinct facets and is '
+					+ '"plan"; it is a single render tool when they asked for one artifact, or when the '
+					+ 'file really holds only one.';
+			}
 			// The deciding step has no drawing tools and runs on a fresh session every
 			// time, so neither the imagery answer nor a component pin means anything to
 			// it: its own framing above is the whole instruction.
