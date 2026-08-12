@@ -61,10 +61,10 @@ module.exports = {
 	// The CLI version this adapter's flags and parser were last verified against
 	// on a real board. detect() reads the installed version; agents/health.js
 	// warns at startup when it is newer. Bump this after re-running test/fake-*.js.
-	testedVersion: '2.1.216',
+	testedVersion: '2.1.226',
 
 	// Flags a turn depends on, checked against `claude --help` at startup
-	// (agents/health.js). Needles verified present in 2.1.216 - not guessed.
+	// (agents/health.js). Needles verified present in 2.1.226 - not guessed.
 	// Critical = generation produces nothing; optional = a feature is lost.
 	capabilityProbe: {
 		bin: BIN,
