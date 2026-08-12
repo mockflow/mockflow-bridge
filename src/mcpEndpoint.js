@@ -405,9 +405,15 @@ class McpEndpoint {
 				+ 'component or several is stated there per component, so read the lines and follow them rather '
 				+ 'than assuming either way. Pass "plan" when no single component can carry the request and it '
 				+ 'genuinely needs SEVERAL DIFFERENT ones: the drawing step then proposes the batch with '
-				+ 'plan_board. If the user is NOT '
-				+ 'asking for anything to be drawn (a question, a chat, a change to something already on the board), '
-				+ 'pass "none" and carry on answering normally.\n\nWhat you may name:\n' + lines.join('\n'),
+				+ 'plan_board. Pass "none" whenever nothing is meant to land on the board and carry on '
+				+ 'answering normally: a question, a chat, a change to something already on the board, or a '
+				+ 'request for suggestions, ideas, opinions or feedback (including about what is already '
+				+ 'there). What decides this is WHERE the user wants the result, never whether their wording '
+				+ 'sounds generative - when you are unsure, pass "none" and answer in chat; they can ask you '
+				+ 'to draw it afterwards. Pass "none" too when a drawing request is missing something that '
+				+ 'would materially change what you draw and neither the conversation nor the board supplies '
+				+ 'it: ask one or two focused questions instead, and draw once the user has '
+				+ 'answered.\n\nWhat you may name:\n' + lines.join('\n'),
 			inputSchema: {
 				type: 'object',
 				properties: {
