@@ -36,6 +36,14 @@
 	],
 	"author": "A Produle Systems Pvt Ltd",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/mockflow/mockflow-bridge.git"
+	},
+	"homepage": "https://github.com/mockflow/mockflow-bridge#readme",
+	"bugs": {
+		"url": "https://github.com/mockflow/mockflow-bridge/issues"
+	},
 	"dependencies": {
 		"ws": "^8.18.0"
 	}
