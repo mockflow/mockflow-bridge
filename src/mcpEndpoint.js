@@ -343,7 +343,8 @@ class McpEndpoint {
 					// agent cannot see what it is allowed to name. Give declare_render
 					// the menu, or it guesses ("render_colorpalette") and burns a call
 					// per guess until it stumbles on a real name.
-					return (declaring && t.name === 'declare_render') ? self5._declareToolDef() : t;
+					return (declaring && t.name === 'declare_render')
+						? self5._declareToolDef((ctx && ctx.boardId) || null) : t;
 				});
 				return { tools: this._toolDefsForTurn(ctx).concat(bridgeTools) };
 			}
@@ -381,7 +382,8 @@ class McpEndpoint {
 	 * the right one. Deliberately short - the whole point of the deciding step is
 	 * that it does not carry the full catalog.
 	 */
-	_declareToolDef() {
+	_declareToolDef(board) {
+		const blocked = this._isFileModeTurn(board) ? this._fileModeBlockedTools() : null;
 		const names = ['none', 'plan'];
 		const lines = [];
 		// "plan" is described from the catalog like every other choice. Left bare it
@@ -393,6 +395,10 @@ class McpEndpoint {
 		for (var i = 0; i < this.registry.length; i++) {
 			const e = this.registry[i];
 			if (!e.mcpToolName || e.mcpToolName.indexOf('render_') !== 0) continue;
+			// The menu must match the catalog exactly - naming a tool here that the
+			// drawing step will not be given is how an agent declares an intent it
+			// then cannot carry out.
+			if (blocked && blocked[e.mcpToolName]) continue;
 			names.push(e.mcpToolName);
 			lines.push(e.mcpToolName + ' - ' + this._declareLine(e, ''));
 		}
@@ -443,6 +449,30 @@ class McpEndpoint {
 		return first || fallback;
 	}
 
+	/**
+	 * Tools that cannot run on a local .mockflow file, by MCP tool name.
+	 *
+	 * Both of these need a MockFlow session: the component is UPLOADED and then
+	 * served from MockFlow (a prototype's share URL, an artifact's host), and a
+	 * local file has no session to upload with and nothing local to serve from.
+	 * They are dropped from the catalog rather than refused on use, so the agent
+	 * never proposes a prototype to someone who cannot have one - a refusal after
+	 * the fact still spends a turn and still leaves the user told about a feature
+	 * that was never available to them.
+	 *
+	 * render_wireframelite is deliberately NOT here: its conversion is a DOM
+	 * capture the desktop app runs in-process, so wireframes work fully on a local
+	 * file and are the right thing for the agent to reach for instead.
+	 */
+	_fileModeBlockedTools() {
+		return { render_prototypelite: true, render_artifact: true };
+	}
+
+	/** True when this turn's board cannot run the server-backed render tools. */
+	_isFileModeTurn(board) {
+		return typeof this.hub.isFileModeBoard === 'function' && this.hub.isFileModeBoard(board);
+	}
+
 	_toolDefsForTurn(ctx) {
 		const board = (ctx && ctx.boardId) || null;
 		// Decide-then-draw: in the declare step the agent gets NO render tools, so
@@ -456,7 +486,10 @@ class McpEndpoint {
 		// { bridge: true }: the catalog keeps back tools that only a connected editor tab
 		// can carry out (an in-place edit of a component the user has open). This IS that
 		// tab's agent, so they belong in its list; an older catalog simply ignores the flag.
-		return this.registry.getToolDefinitions({ bridge: true }).map(function(def) {
+		const blocked = this._isFileModeTurn(board) ? this._fileModeBlockedTools() : null;
+		return this.registry.getToolDefinitions({ bridge: true }).filter(function(def) {
+			return !(blocked && blocked[def.name]);
+		}).map(function(def) {
 			const entry = self._entry(def.name);
 			if (!entry || !entry.imageSlots) return def;
 			// A component's two branches are COMPOSITION rules - they describe how to
@@ -514,6 +547,27 @@ class McpEndpoint {
 						this.hub.setTurnPhase(board, 'compose');
 						this.hub.noteDeclared(board, 'none');
 						return this._ok('Nothing to draw - carry on and answer the user normally.');
+					}
+					// A drawing request is starting, so any plan card still sitting
+					// unanswered from an EARLIER request is stale: the user asked for
+					// something else, which is their answer to it. Released here or the
+					// board refuses this draw too, and every one after it, until the
+					// 30-minute picker timeout - the deadlock a terminal-driven agent
+					// cannot get out of, because the card it is told to wait for lives in
+					// a browser tab and it has no way to reach it. Not done for 'none':
+					// a question about the board is not the user walking away from the
+					// proposal.
+					this.hub.releasePendingPick(board, 'a new drawing request was declared');
+					// The blocked tools are already absent from this board's menu, so this
+					// is only reachable from a tools/list the agent cached before the board
+					// became a local file. Answered with the alternative rather than a bare
+					// refusal, because "prototype" is a word users say and the agent needs
+					// somewhere to go with it.
+					const blockedD = this._isFileModeTurn(board) ? this._fileModeBlockedTools() : null;
+					if (blockedD && blockedD[want]) {
+						return this._err(want + ' needs a MockFlow session to host what it builds, and this board is '
+							+ 'a local file. Declare render_wireframelite instead - it works fully here - and tell the '
+							+ 'user that a clickable prototype needs a cloud project.');
 					}
 					if (want === 'plan') {
 						// No single component covers the request, so this turn draws a batch. The

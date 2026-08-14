@@ -9,7 +9,10 @@
  * Wire protocol (JSON frames):
  *   tab -> bridge:  {t:'hello', token?}         first frame after connect
  *                   {t:'pair', code}            answer to pair-required
- *                   {t:'register', projectid, title, focused, visible, url, compturn?}
+ *                   {t:'register', projectid, title, focused, visible, url, compturn?,
+ *                        isBasic?, fileMode?}
+ *                        fileMode: the board is a local .mockflow file - no MockFlow
+ *                        session, so server-backed tools are dropped from the catalog
  *                        compturn: reconnecting mid-turn, still waiting on this
  *                        component-AI turn
  *                   {t:'state', focused, visible, projectid, title}
@@ -27,6 +30,9 @@
  *                   {t:'layout', id, boardTitle}
  *                   {t:'snapshot', id}              reset the layout batch boundary
  *                   {t:'plan-pick', id, boardTitle, items}   user selects plan items
+ *                   {t:'plan-dismiss', reason}  the pick was released without an
+ *                        answer (superseded by a new drawing request, or the tab
+ *                        went away) - retire the card, it no longer decides anything
  *                   {t:'plan-start', boardTitle, total, items}  generation began
  *                   {t:'plan-step', step}       timeline row (same shape as ai-step)
  *                   {t:'plan-progress', done, total}   one planned item landed
@@ -183,6 +189,10 @@ class BoardHub {
 				if (tab.projectid) {
 					self.componentReads.delete(tab.projectid);
 					self.turnNotes.delete(tab.projectid);
+					// A plan pick this tab never answered must not outlive it. The pick is
+					// keyed by board, so a reload would come back to a board that refuses
+					// every draw, with the card that explains it no longer on screen.
+					self.releasePendingPick(tab.projectid, 'the board tab went away');
 				}
 			}
 			// Files the user attached during this board's session were saved on
@@ -299,6 +309,9 @@ class BoardHub {
 				tab.focused = !!msg.focused;
 				tab.visible = msg.visible !== false;
 				tab.url = msg.url || null;
+				// A local .mockflow file: no MockFlow session behind the board, so the
+				// tools that need one are dropped from the agent's catalog (mcpEndpoint).
+				tab.fileMode = !!msg.fileMode;
 				this._send(ws, { t: 'registered', agentInfo: this._agentInfoFor(tab) });
 				// A tab that reconnects mid-turn says which component-AI turn it is still
 				// waiting on (msg.compturn). Usually the turn is alive and its result lands
@@ -314,7 +327,8 @@ class BoardHub {
 						error: 'The connection to the local agent dropped for too long and its turn was lost.' });
 				}
 				this.log('Board connected: "' + (tab.title || tab.projectid) + '"'
-					+ (tab.focused ? ' (focused)' : '') + (tab.isBasic ? ' [basic plan]' : ''));
+					+ (tab.focused ? ' (focused)' : '') + (tab.isBasic ? ' [basic plan]' : '')
+					+ (tab.fileMode ? ' [local file]' : ''));
 				return;
 
 			case 'state':
@@ -323,6 +337,9 @@ class BoardHub {
 				if (msg.title !== undefined) tab.title = msg.title;
 				if (msg.focused !== undefined) tab.focused = !!msg.focused;
 				if (msg.visible !== undefined) tab.visible = !!msg.visible;
+				// Follows the tab: FILEMODE flips when a file closes back into a cloud
+				// project, and this connection outlives that.
+				if (msg.fileMode !== undefined) tab.fileMode = !!msg.fileMode;
 				return;
 
 			case 'result': {
@@ -688,6 +705,10 @@ class BoardHub {
 		// plan-done all go straight to the tab that answered the picker, so Mida can
 		// run the same loader the server multiboard turn runs.
 		const sendToTab = function(frame) { self._send(target.ws, frame); };
+		// How releasePendingPick reaches the card when something OTHER than the
+		// user's own click ends this pick, so the card never stays on screen
+		// looking answerable after it has stopped meaning anything.
+		pick.notify = sendToTab;
 
 		this.log('[plan] picker sent to board ' + key + ': "' + boardTitle + '" (' + items.length + ' item(s))');
 
@@ -771,6 +792,63 @@ class BoardHub {
 				self.log('[plan] picker unanswered on board ' + key + ' - nothing generated'
 					+ (err && err.message ? ' (' + err.message + ')' : ''));
 			});
+	}
+
+	/**
+	 * Stop a board's outstanding plan pick from gating draws.
+	 *
+	 * The pick REFUSES every draw on its board while it is outstanding (see
+	 * captureOrDraw / drawHtml), and it is keyed by BOARD - not by tab, not by chat
+	 * session, and not by the agent turn that proposed it. So it outlives all three,
+	 * and anything that makes the proposal stale has to release it here or the next
+	 * thing anyone asks for is refused for up to PLAN_PICK_TIMEOUT_MS with the card
+	 * that would explain it gone, or never seen at all: an agent driven from a
+	 * terminal proposes a plan into a browser tab the user may not even have open.
+	 *
+	 * The outstanding _request is deliberately left to its own timeout. Nothing waits
+	 * on it once the pick is released, and its handlers call settle() on a pick that
+	 * is already gone, which is a no-op.
+	 */
+	releasePendingPick(projectid, why) {
+		// Same null-resolution as captureOrDraw / drawHtml / clearPlan: an MCP
+		// connection that is not scoped to one board passes null, and the pick that
+		// gates ITS draws is the active tab's. Without this the release quietly did
+		// nothing for exactly the connection the deadlock was reported on.
+		var key = projectid;
+		if (!key) {
+			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
+		}
+		if (!key) return false;
+		const pick = this.pendingPicks.get(key);
+		if (!pick || pick.decided) return false;
+		pick.decided = true;
+		this.pendingPicks.delete(key);
+		this.log('[plan] picker released on board ' + key + (why ? ' - ' + why : ''));
+		// Retire the card in the tab. Unknown frame types are ignored by older
+		// editors, so a bridge ahead of the page it is talking to just leaves the
+		// card where it was - still skippable by hand, and no longer blocking.
+		if (pick.notify) {
+			try { pick.notify({ t: 'plan-dismiss', reason: why || '' }); } catch (e) {}
+		}
+		return true;
+	}
+
+	/**
+	 * Is this board a local .mockflow file? Reported by the tab on register and on
+	 * every state change. Unknown boards answer false: a tab too old to send the
+	 * flag keeps the full catalog and is refused per tool instead, which is the
+	 * behaviour that shipped before this existed.
+	 */
+	isFileModeBoard(projectid) {
+		var key = projectid;
+		if (!key) {
+			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
+		}
+		if (!key) return false;
+		for (const tab of this.tabs.values()) {
+			if (tab.registered && tab.projectid === key) return !!tab.fileMode;
+		}
+		return false;
 	}
 
 	/** True while the board's plan selection is still in front of the user. */
