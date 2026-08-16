@@ -292,3 +292,65 @@ against a real board, using the harnesses in `test/`:
 
 `test/fake-modify.js` and `test/fake-attach.js` exist because their flows were
 each broken in a way the other harnesses reported as a pass.
+
+## What keeps a supported agent working (runtime resilience)
+
+A vendor changing its CLI's output format used to be a product-breaking event:
+turn success was read off the parsed stdout events, so an unrecognized stream
+made a working turn look failed, hung, or empty. Since the turn-verdict rework,
+success is judged against the channel the vendor cannot drift: the MCP tool
+calls the bridge itself served (`boardHub.noteToolServed`, counted at the
+endpoint's front door and read as a per-turn delta by `agentManager`).
+
+The layers, cheapest first:
+
+| Layer | Catches | Where |
+| --- | --- | --- |
+| Parser canary (boot, offline) | Our own parser regressions | `src/agents/health.js` + each adapter's `selfTest` |
+| Capability probe (boot) | A flag removed from the CLI's `--help` | `capabilityProbe` per adapter |
+| Version floor (boot) | Installed CLI newer than last verified | `testedVersion` per adapter |
+| MCP-served cross-check (per turn) | Clean exits that drew nothing; draws routed to the wrong MockFlow connection; blind parsers hiding a real success | `agentManager` verdicts |
+| Runtime parser health (per turn, persisted) | The installed CLI changed its output format in the field | `src/agents/runtimeHealth.js`, surfaced in the activity log, dashboard warning line and next boot's banner |
+
+Consequences of a vendor format change now: the board still draws and the turn
+is reported honestly (with a synthesized reply where the real one was
+unreadable); session resume may degrade to fresh conversations; timeline rows
+and streamed replies may go quiet - and every one of those degradations is
+flagged with the CLI version it appeared on, so the fix (usually a one-file
+`parseLine` edit) is scheduled work instead of a fire.
+
+The stream plumbing all lanes share lives in `src/agents/turnRunner.js`; the
+per-adapter surface is only "one line in, normalized events out". The live
+verification battery above is still the bar for LISTING an agent - the
+resilience lowers the cost of vendor drift after listing, not the bar itself.
+
+## The universal tier (basic support)
+
+Below the three fully-adapted CLIs sits a second tier built on the runtime
+resilience above: `src/agents/universal.js` turns an orca-sized config - a
+launch command, a prompt flag, a few quirk flags - into a selectable agent
+with **no output parser at all**. It works because turn success is judged by
+the MCP calls the bridge serves, not by reading the CLI's stream; plain
+stdout lines double as the chat reply (these CLIs print their headless answer
+as text), and JSON/log noise is dropped.
+
+What the tier gives up, by design: the user wires the bridge into the CLI
+once with its own `mcp add` (no per-turn board-scoped endpoint - draws follow
+the selected board, so avoid generating on two boards at once), no tool
+timeline rows, no model label, no session resume (the bridge-owned
+conversation record still rides every prompt), no per-turn tool allowlist,
+and the decide-then-draw step is skipped (imagery defaults to off). A turn
+whose calls never arrive fails with the wiring command in the error instead
+of a phantom success.
+
+| Agent | Tier | Status |
+| --- | --- | --- |
+| Claude Code / Codex / opencode | Full | Well tested - the full live battery (see above) |
+| Gemini CLI | Universal ("basic") | Live-verified 0.54.0: fake-chat + fake-compgen passing; needs `gemini mcp add -s user -t http --trust mockflow <endpoint>` once, plus gemini auth. `--skip-trust` rides every turn (headless gemini refuses untrusted directories - the cwd is the bridge scratch dir or the user's own --workspace) |
+| Cursor CLI | Universal ("experimental") | Drafted from vendor docs, NOT yet seen passing the live harnesses - the label says so until someone with `cursor-agent` installed runs test/fake-chat.js and fake-compgen.js against it |
+
+Tier labels ride the agent's `label` string, so every picker, banner and hint
+shows them without special-casing. Adding another universal agent is one
+config entry in `universal.js` plus a live run of the two harnesses to earn
+the "(basic)" label; promotion to the full tier (streaming, timeline, resume)
+remains a normal adapter project.

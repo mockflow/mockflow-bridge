@@ -49,14 +49,23 @@ whichever suits you:
 
 **Option A: an assistant app you install.** Best if you already pay for one.
 
-| Assistant | Install it with | Then sign in with |
-| --- | --- | --- |
-| Claude Code | `npm i -g @anthropic-ai/claude-code` | `claude` |
-| Codex | `npm i -g @openai/codex` | `codex login` |
-| opencode | see [opencode.ai](https://opencode.ai) | `opencode` |
+| Assistant | Support | Install it with | Then sign in with |
+| --- | --- | --- | --- |
+| Claude Code | Well tested | `npm i -g @anthropic-ai/claude-code` | `claude` |
+| Codex | Well tested | `npm i -g @openai/codex` | `codex login` |
+| opencode | Well tested | see [opencode.ai](https://opencode.ai) | `opencode` |
+| Gemini CLI | Basic | `npm i -g @google/gemini-cli` | `gemini` |
+| Cursor CLI | Experimental | see [cursor.com/cli](https://cursor.com/cli) | `cursor-agent login` |
 
 Run the install command in your terminal, then run the sign-in command once and
 follow the prompts. You only do this the first time.
+
+**Well tested** assistants get the full experience: streamed replies, a live
+tool timeline, session memory. **Basic** ones draw on the board and answer in
+chat, but without streaming, timeline rows or session memory &mdash; and they
+need one extra wiring command the bridge prints at startup (for Gemini:
+`gemini mcp add -s user -t http --trust mockflow <endpoint>`).
+**Experimental** means it has not been verified live yet.
 
 **Option B: BridgeAI, built in.** Nothing extra to install &mdash; BridgeAI comes
 with the bridge. Instead of an app, it uses an API key from an AI provider you
@@ -267,8 +276,12 @@ startup, including a secret token, so copy it from there:
 ```bash
 claude mcp add --transport http -s user mockflow http://127.0.0.1:21196/mcp/<token>
 codex mcp add mockflow --url http://127.0.0.1:21196/mcp/<token>
-gemini mcp add -t http -s user mockflow http://127.0.0.1:21196/mcp/<token>
+gemini mcp add -s user -t http --trust mockflow http://127.0.0.1:21196/mcp/<token>
 ```
+
+(For Gemini the same command also powers in-editor chat &mdash; its basic-tier
+turns reach the board through this wiring, so `--trust` matters: without it
+headless turns stall on a tool-approval prompt nobody is there to answer.)
 
 Clients that only speak stdio use `mockflow-bridge stdio` as the command.
 
@@ -292,7 +305,7 @@ sources. It is stored in `~/.mockflow/bridge-mcp-token` and survives restarts.
 | Option | What it does |
 | --- | --- |
 | `--workspace <path>` | Let the agent read one folder (off by default) |
-| `--agent <id>` | `claude`, `codex`, `opencode` or `bridgeai`, for this run only |
+| `--agent <id>` | `claude`, `codex`, `opencode`, `gemini`, `cursor` or `bridgeai`, for this run only |
 | `--auto-update` | Install a newer published bridge when one appears, then restart into it. Off by default; never runs mid turn, and never uses sudo (see Updating) |
 | `MFBRIDGE_PORT` | Port (default 21196) |
 | `MFBRIDGE_AGENT` | Same as `--agent` |
@@ -358,7 +371,7 @@ model choices are saved in `~/.mockflow/` and reused on the next start.
 ## How it works
 
 ```
-Claude Code / Codex / opencode / BridgeAI   (the brain: generates component JSON)
+Claude Code / Codex / opencode / Gemini / BridgeAI   (the brain: generates component JSON)
         | MCP  (POST /mcp/<token>, or the stdio shim)
         v
 mockflow-bridge daemon                (engine: validate, map args -> gdata)
@@ -433,11 +446,26 @@ you type in Mida  ->  board socket  ->  bridge spawns the agent headless
 
 ## Adding another agent
 
-Agents are plugins in `src/agents/` (Claude Code, Codex, opencode, and BridgeAI
-&mdash; our own OpenAI-compatible agent, which spawns no external binary). Adding
-one is a single file plus a line in `src/agents/index.js`, and nothing else in
-the bridge, the editor or the server changes. The contract, the capability flags
-and the fallbacks are documented at the top of `src/agents/index.js`.
+Agents are plugins in `src/agents/` (Claude Code, Codex, opencode, the
+universal tier, and BridgeAI &mdash; our own OpenAI-compatible agent, which
+spawns no external binary). There are two ways in:
+
+- **Universal tier** (the cheap way): one config entry in
+  `src/agents/universal.js` &mdash; a launch command, a prompt flag, a few quirk
+  flags. No output parser: turn success is judged by the MCP calls the bridge
+  itself serves, plain stdout lines double as the chat reply, and the user
+  wires the CLI to the bridge once with its own `mcp add`. Run
+  `test/fake-chat.js` and `test/fake-compgen.js` live to earn the "(basic)"
+  label; until then the entry is labelled "(experimental)".
+- **Full adapter** (the premium way): a single file plus a line in
+  `src/agents/index.js`, adding streamed replies, a tool timeline, session
+  resume and per-turn tool allowlists. The contract, the capability flags and
+  the fallbacks are documented at the top of `src/agents/index.js`; the full
+  live battery in `test/` gates the listing.
+
+Either way, nothing else in the bridge, the editor or the server changes. How
+the tiers behave and what each gives up is in
+[AGENT-COMPARISON.md](AGENT-COMPARISON.md).
 
 ## Security
 

@@ -523,6 +523,11 @@ class McpEndpoint {
 		// tool documents one.
 		const board = (ctx && ctx.boardId) || null;
 
+		// Ground truth for the turn's verdict: this call REACHED the bridge,
+		// whatever the agent's own output stream says about it. Counted before
+		// dispatch on purpose - see hub.noteToolServed.
+		if (typeof this.hub.noteToolServed === 'function') this.hub.noteToolServed(board);
+
 		try {
 			switch (name) {
 				case 'list_boards':

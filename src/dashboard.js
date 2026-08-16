@@ -349,6 +349,9 @@ function snapshot() {
 	if (!agentOK) warn = 'No AI agent available — press a to choose, or set a provider key for BridgeAI.';
 	else if (isBai && !providerKey) warn = 'BridgeAI has no provider key. Set OPENROUTER_API_KEY (or Azure / Bedrock).';
 	else if (isBai && !model) warn = 'No model selected for ' + (provider ? provider.label : 'BridgeAI') + ' — press m.';
+	// Live runtime verdict first: it comes from actual turns against the
+	// installed CLI, so it is fresher than anything computed at boot.
+	else if (typeof agents.runtimeWarning === 'function' && agents.runtimeWarning()) warn = agents.runtimeWarning();
 	else if (healthWarn) warn = healthWarn;
 
 	var active = boards.filter(function (b) { return b.projectid === hub.selectedProjectId; })[0]
@@ -676,6 +679,10 @@ function warnFromProblems(problems) {
 		if (p.helpFailed) return p.label + ': could not read its --help.';
 	}
 	if (p.kind === 'canary') return p.label + ': internal parser check failed.';
+	if (p.kind === 'runtime') {
+		if (p.parserBlind) return p.label + ': output format not recognized — the board still draws, but replies and progress are degraded. Update the bridge.';
+		return p.label + ': tool progress not recognized — timeline rows may be missing.';
+	}
 	return null;
 }
 

@@ -85,6 +85,14 @@ class BoardHub {
 		this.turnRequests = new Map(); // projectid -> the user's OWN words for this turn
 		this.selectedProjectId = null;
 		this.nextId = 1;
+		// MCP tool calls actually SERVED, counted at the endpoint's front door.
+		// This is the vendor-stable ground truth an agent turn's success is
+		// cross-checked against: the per-vendor stdout parsers can go blind when a
+		// CLI changes its output format, but a call that reached the bridge is a
+		// fact no format change can hide. Monotonic - callers keep a snapshot and
+		// read the delta (agentManager), so nothing here needs a turn boundary.
+		this.toolServedTotal = 0;
+		this.toolServedByBoard = new Map(); // projectid -> count
 
 		// One pairing code per daemon run, printed on the console. A tab that
 		// presents it gets a durable token (persisted, survives restarts).
@@ -855,6 +863,38 @@ class BoardHub {
 	hasPendingPick(key) {
 		const pick = key ? this.pendingPicks.get(key) : null;
 		return !!(pick && !pick.decided);
+	}
+
+	/**
+	 * One MCP tool call reached the bridge. Called by the endpoint for every
+	 * tools/call BEFORE it is dispatched: an attempt is the proof that matters
+	 * (the agent found and used our server), so a call that then errors still
+	 * counts. A call with no board scope is attributed to the selected board,
+	 * which every agent turn pins to itself for its duration.
+	 */
+	noteToolServed(projectid) {
+		this.toolServedTotal++;
+		const key = projectid || this.selectedProjectId || '';
+		this.toolServedByBoard.set(key, (this.toolServedByBoard.get(key) || 0) + 1);
+	}
+
+	/** Monotonic served-call count for one board (or the global total). */
+	toolServedCount(projectid) {
+		if (!projectid) return this.toolServedTotal;
+		return this.toolServedByBoard.get(projectid) || 0;
+	}
+
+	/**
+	 * How the armed plan is doing: { done, total } of the batch the user
+	 * confirmed, or null when none is armed. This count is fed by the draws that
+	 * actually LANDED (_notePlannedDraw), so it is the board's own answer to
+	 * "how much of the plan exists" - read by the plan batch's verdict as the
+	 * authority when the per-vendor stdout parsers saw nothing.
+	 */
+	planDone(projectid) {
+		const plan = projectid ? this.plans.get(projectid) : null;
+		if (!plan) return null;
+		return { done: plan.done || 0, total: plan.total || 0 };
 	}
 
 	/** Drop the plan for a board (explicit layout_board call, or board went away). */

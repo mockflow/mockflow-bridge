@@ -28,6 +28,8 @@ const path = require('path');
 const os = require('os');
 const config = require('./config');
 const agents = require('./agents');
+const { watchTurn } = require('./agents/turnRunner');
+const runtimeHealth = require('./agents/runtimeHealth');
 
 const PERSONA =
 	'You are Mida, MockFlow\'s AI assistant, chatting inside the user\'s live IdeaBoard. '
@@ -584,6 +586,81 @@ class AgentManager {
 	}
 
 	/**
+	 * A monotonic reading of the MCP calls the bridge served for this board,
+	 * taken at turn start; the returned function gives the delta since. This is
+	 * the turn's ground truth: the per-vendor stdout parser can go blind when a
+	 * CLI changes its output format, but a tool call that reached the bridge is
+	 * a fact no format change can hide. Turn verdicts are cross-checked against
+	 * it so a blind parser degrades the narration, never the product.
+	 */
+	_mcpCounter(hub, projectid) {
+		const readable = !!(hub && typeof hub.toolServedCount === 'function');
+		const base = readable ? hub.toolServedCount(projectid || null) : 0;
+		return function() { return readable ? (hub.toolServedCount(projectid || null) - base) : 0; };
+	}
+
+	/**
+	 * Record one finished turn's parse-vs-reality numbers (agents/runtimeHealth)
+	 * and say so in the activity log the first time a verdict changes - once,
+	 * not per turn, so a broken parser is one loud line rather than a drone.
+	 */
+	_noteTurnHealth(stats, mcpServed, expectParse) {
+		if (!stats) return;
+		try {
+			// A universal-tier agent has no real parser by design: its stats must
+			// never read as a parser gone blind, whatever the caller passed.
+			if (this.agent.capabilities && this.agent.capabilities.parserless) expectParse = false;
+			const version = ((this.agent.detect && this.agent.detect()) || {}).version || '';
+			const res = runtimeHealth.noteTurn(this.agent.id, version, stats, mcpServed, expectParse);
+			if (!res.changed) return;
+			if (res.parserBlind) {
+				this.log('⚠ ' + this.agent.label + ' output format not recognized: ' + stats.stdoutLines
+					+ ' line(s) of output, 0 understood'
+					+ (mcpServed ? ' - board calls still landed, so turns keep working with degraded progress/replies'
+						: '')
+					+ '. Update mockflow-bridge, or report this with the CLI version.');
+			} else if (res.toolEventsBlind) {
+				this.log('⚠ ' + this.agent.label + ' tool events not recognized: board calls landed but no tool '
+					+ 'progress could be read - timeline rows will be missing.');
+			} else {
+				this.log(this.agent.label + ' output format recognized again - full progress restored.');
+			}
+		} catch (e) {}
+	}
+
+	/**
+	 * The one-line warning the dashboard shows while the selected agent's
+	 * output format is unreadable. Null when all is well.
+	 */
+	runtimeWarning() {
+		const rec = runtimeHealth.status(this.agent.id);
+		if (!rec) return null;
+		if (rec.parserBlind) {
+			return this.agent.label + ': output format not recognized - the board still draws, but replies and '
+				+ 'progress are degraded. Update mockflow-bridge.';
+		}
+		if (rec.toolEventsBlind) {
+			return this.agent.label + ': tool progress not recognized - timeline rows may be missing.';
+		}
+		return null;
+	}
+
+	/**
+	 * Whether a parsed tool-start names one of OUR board tools, in any of the
+	 * three per-CLI vocabularies (mcp__mockflow__x / mockflow_x / bare x). Used
+	 * for the wrong-target check: a turn that visibly called board tools while
+	 * the bridge served nothing sent those calls somewhere else (another
+	 * MockFlow MCP connection) or had them denied - either way nothing landed
+	 * on this board, and "success" would be a lie.
+	 */
+	_looksLikeBoardTool(toolName) {
+		const name = String(toolName || '');
+		if (!name) return false;
+		if (/^mcp__mockflow__|^mockflow[_.]/.test(name)) return true;
+		return this._mockflowToolNames().indexOf(bareToolName(name)) !== -1;
+	}
+
+	/**
 	 * Swap the CLI that answers from here on (`mockflow-bridge agent <id>` against
 	 * a running bridge). Sessions are dropped because a resume id belongs to the
 	 * agent that issued it - the next turn on each board starts fresh instead of
@@ -889,7 +966,13 @@ class AgentManager {
 		// instead of composing it once, asking, and composing it again. The second
 		// step is this same method re-entered with the tools available; the tab
 		// never sees two turns, because no chat-done is sent in between.
-		const declarePhase = frame.__phase !== 'compose';
+		//
+		// A universal-tier (parserless) agent skips the declare step entirely: the
+		// step's value is a readable held-back reply and a mid-turn imagery
+		// question, neither of which this tier can carry. Its turns run straight
+		// to compose with imagery defaulting to off (the safe, free choice).
+		const parserless = !!this.agent.capabilities.parserless;
+		const declarePhase = frame.__phase !== 'compose' && !parserless;
 		hub.setTurnPhase(tab.projectid, declarePhase ? 'declare' : 'compose');
 		// The user's OWN words, for the whole turn (both steps). Some components may
 		// only be chosen when the request asks for them in so many words, and that is
@@ -919,7 +1002,7 @@ class AgentManager {
 		// just gave, and the component the deciding step settled on. Held apart from
 		// the persona because an agent whose system prompt applies only when a session
 		// is CREATED has to be given them another way - see turnInstructionsInMessage.
-		var turnInstructions = this._openImageTurn(hub, tab, frame);
+		var turnInstructions = this._openImageTurn(hub, tab, frame, parserless ? false : undefined);
 		// The drawing step of a decide-then-draw turn: the choice was already made (and
 		// the user answered the imagery question about THAT choice), so it is stated
 		// rather than left to be made a second time from the bare request.
@@ -1085,6 +1168,10 @@ class AgentManager {
 			+ (session.sessionId ? ' (resumed session)' : ' (new session)')
 			+ ', workspace: ' + ws + (tab && tab.isBasic ? ' (basic plan - files off)' : ''));
 
+		// Snapshot the bridge-served MCP call count before the agent can make one:
+		// finish() reads the delta as this turn's ground truth.
+		const mcpDelta = this._mcpCounter(hub, tab.projectid);
+
 		var proc;
 		try {
 			proc = this._spawnWithPrompt(spec, delivery, {
@@ -1107,11 +1194,14 @@ class AgentManager {
 		var pendingSteps = {};
 		var turnEnded = false;
 		var stepCounter = 0;
+		// A board tool was seen STARTING in the agent's own stream. finish() holds
+		// this against the bridge-served count: seen here but served nowhere means
+		// the calls went to a different MockFlow connection or were denied.
+		var sawBoardTool = false;
 		// Both steps of a decide-then-draw turn report into the SAME tab turn, and the
 		// drawing step is a fresh process whose counter starts at 0 again - so the phase
 		// goes in the id, or its first tool row lands on top of the deciding step's row.
 		const stepIdBase = 'la_' + turnId + (declarePhase ? '_d' : '_c');
-		var buf = '';
 
 		// Open one step row for a tool the moment we learn of it. Idempotent per
 		// tool_use id: the partial stream announces the tool BEFORE its input is
@@ -1157,83 +1247,62 @@ class AgentManager {
 			});
 		}
 
-		function handleLine(line) {
-			var events = self.agent.parseLine(line);
-			for (var e = 0; e < events.length; e++) {
-				var ev = events[e];
-				if (ev.type === 'session') {
-					// ...and it must not BECOME the conversation either: the id it
-					// reports is thrown away, so the drawing step and every later turn
-					// continue the real one.
-					if (!declarePhase && !session.sessionId) session.sessionId = ev.id;
-				} else if (ev.type === 'model') {
-					self._noteModel(ev.id, hub);
-				} else if (ev.type === 'text') {
-					// Agents differ in what a text event carries: whole blocks (joined
-					// with a blank line) or incremental deltas (appended verbatim).
-					replyText += (self.agent.capabilities.textChunks === 'delta')
-						? ev.text
-						: (replyText ? '\n\n' : '') + ev.text;
-					// The deciding step does not speak: it either names a component, and then the
-					// drawing step answers the user, or it says "none" and becomes the answer
-					// itself. Its text is held until that is known, so a preamble written just
-					// before declare_render never lands in the bubble the drawing step will fill.
-					var phSoFar = declarePhase ? self.chatPhases.get(key) : null;
-					var holdText = declarePhase && !(phSoFar && phSoFar.declaredNone);
-					// Only agents that really stream get to update the bubble mid-turn.
-					// A non-streaming agent emits its preamble ("I'll draw that now") as a
-					// finished message and then goes quiet for many seconds while it writes
-					// the tool call: pushing that text out ends the tab's thinking state, so
-					// the turn looks finished and then jumps back to life when the drawing
-					// starts. Holding it keeps one honest "working" state until there is
-					// something to show. finish() flushes whatever was held.
-					if (!holdText && self.agent.capabilities.streamsPartialText) {
-						sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
-					}
-				} else if (ev.type === 'tool-start') {
-					startStep(ev.id, ev.name);
-				} else if (ev.type === 'tool-end') {
-					// Answered before its row was due: a denial, or a tool that took no
-					// time worth showing. Either way nothing is opened - see startStep.
-					if (pendingSteps[ev.id]) {
-						clearTimeout(pendingSteps[ev.id]);
-						delete pendingSteps[ev.id];
-					}
-					var open = openSteps[ev.id];
-					if (open) {
-						delete openSteps[ev.id];
-						sendToTab({
-							t: 'chat-step', id: turnId,
-							step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
-						});
-					}
+		function handleEvent(ev) {
+			if (ev.type === 'session') {
+				// ...and it must not BECOME the conversation either: the id it
+				// reports is thrown away, so the drawing step and every later turn
+				// continue the real one.
+				if (!declarePhase && !session.sessionId) session.sessionId = ev.id;
+			} else if (ev.type === 'model') {
+				self._noteModel(ev.id, hub);
+			} else if (ev.type === 'text') {
+				// Agents differ in what a text event carries: whole blocks (joined
+				// with a blank line) or incremental deltas (appended verbatim).
+				replyText += (self.agent.capabilities.textChunks === 'delta')
+					? ev.text
+					: (replyText ? '\n\n' : '') + ev.text;
+				// The deciding step does not speak: it either names a component, and then the
+				// drawing step answers the user, or it says "none" and becomes the answer
+				// itself. Its text is held until that is known, so a preamble written just
+				// before declare_render never lands in the bubble the drawing step will fill.
+				var phSoFar = declarePhase ? self.chatPhases.get(key) : null;
+				var holdText = declarePhase && !(phSoFar && phSoFar.declaredNone);
+				// Only agents that really stream get to update the bubble mid-turn.
+				// A non-streaming agent emits its preamble ("I'll draw that now") as a
+				// finished message and then goes quiet for many seconds while it writes
+				// the tool call: pushing that text out ends the tab's thinking state, so
+				// the turn looks finished and then jumps back to life when the drawing
+				// starts. Holding it keeps one honest "working" state until there is
+				// something to show. finish() flushes whatever was held.
+				if (!holdText && self.agent.capabilities.streamsPartialText) {
+					sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
+				}
+			} else if (ev.type === 'tool-start') {
+				if (self._looksLikeBoardTool(ev.name)) sawBoardTool = true;
+				startStep(ev.id, ev.name);
+			} else if (ev.type === 'tool-end') {
+				// Answered before its row was due: a denial, or a tool that took no
+				// time worth showing. Either way nothing is opened - see startStep.
+				if (pendingSteps[ev.id]) {
+					clearTimeout(pendingSteps[ev.id]);
+					delete pendingSteps[ev.id];
+				}
+				var open = openSteps[ev.id];
+				if (open) {
+					delete openSteps[ev.id];
+					sendToTab({
+						t: 'chat-step', id: turnId,
+						step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
+					});
 				}
 			}
 		}
 
-		proc.stdout.on('data', function(chunk) {
-			buf += chunk.toString();
-			var nl;
-			while ((nl = buf.indexOf('\n')) >= 0) {
-				var line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (line) handleLine(line);
-			}
-		});
-
-		var stderrTail = '';
-		var stderrBuf = '';
-		proc.stderr.on('data', function(d) {
-			stderrTail = (stderrTail + d.toString()).slice(-2000);
-			// The model may ride a stderr log line (opencode). Scan complete lines.
-			stderrBuf += d.toString();
-			var nl;
-			while ((nl = stderrBuf.indexOf('\n')) >= 0) {
-				var sline = stderrBuf.slice(0, nl);
-				stderrBuf = stderrBuf.slice(nl + 1);
-				var m = self._modelFromStderr(sline);
-				if (m) self._noteModel(m, hub);
-			}
+		// One shared loop buffers both streams, feeds the parser, scans stderr for
+		// the model line and keeps the parse-vs-reality stats finish() judges by.
+		const streamStats = watchTurn(this.agent, proc, {
+			onEvent: handleEvent,
+			onModel: function(m) { self._noteModel(m, hub); }
 		});
 
 		function finish(ok, error) {
@@ -1242,8 +1311,57 @@ class AgentManager {
 			// "sign in first" line instead of failing it. Turn that into a real
 			// error so the board shows how to fix it, not the cryptic line as Mida.
 			if (ok && !error && self.agent.authFailureHint) {
-				var hint = self.agent.authFailureHint(replyText || stderrTail);
+				var hint = self.agent.authFailureHint(replyText || streamStats.stderrTail);
 				if (hint) { ok = false; error = hint; replyText = ''; }
+			}
+			// The turn's verdict is cross-checked against the MCP calls the bridge
+			// itself served - the channel a vendor's output-format change cannot
+			// touch. The parse stats are recorded either way, so a blind parser is
+			// reported once in the log and at the next boot instead of rotting.
+			const mcpServed = mcpDelta();
+			const verdict = runtimeHealth.assessTurn(streamStats, mcpServed);
+			self._noteTurnHealth(streamStats, mcpServed, true);
+			// The agent's own stream showed board tools starting, yet none of those
+			// calls reached this bridge: they went to a different MockFlow connection
+			// (the codex_apps hijack shape), or were denied before the wire. Either
+			// way nothing landed on the board in front of the user, and reporting
+			// success would be the exact silent failure the foreign-server defences
+			// exist for.
+			if (ok && !error && sawBoardTool && mcpServed === 0 && tab.projectid) {
+				ok = false;
+				error = 'The agent called its board tools, but none of the calls reached this board. It may '
+					+ 'have drawn into a different MockFlow connection (another bridge, or a hosted MockFlow '
+					+ 'app), or the calls were denied. Nothing changed on this board.';
+			}
+			// The agent exited cleanly but the whole turn is unobservable: no board
+			// calls arrived AND its output parsed to nothing. That is not a success
+			// with an empty reply - it is a turn that did nothing anyone can see.
+			// For a universal-tier agent the usual cause is wiring (its own `mcp
+			// add` was never run), so that is what its message says.
+			if (ok && !error && verdict.blind && mcpServed === 0) {
+				ok = false;
+				error = parserless
+					? ('No reply and no board calls arrived from ' + self.agent.label + '. Connect it to the '
+						+ 'bridge once with: ' + ((self.agent.wiringHint && self.agent.wiringHint()) || 'the command '
+						+ 'in the bridge startup box') + ' - then try again.')
+					: ('The local agent ran, but nothing it did could be read: no board calls arrived and '
+						+ 'its output format was not recognized. Updating mockflow-bridge may fix this; '
+						+ '`mockflow-bridge agent` switches to another installed agent meanwhile.');
+			}
+			// The opposite case: the board work demonstrably happened (the bridge
+			// served the calls) while the reply stream was unreadable. The turn is a
+			// real success - say so plainly instead of showing an empty bubble.
+			if (ok && !declarePhase && verdict.blind && mcpServed > 0 && !replyText) {
+				replyText = parserless
+					? 'Done, the board work completed.'
+					: 'Done, the board work completed. I could not read the agent\'s reply because its '
+						+ 'output format changed, so updating mockflow-bridge will bring full replies back.';
+			}
+			// A resumable agent whose session id could not be read: the turn worked,
+			// but the next one starts a fresh conversation. Said in the log so a
+			// "Mida forgot what we discussed" report has its cause on record.
+			if (ok && verdict.blind && canResume && !declarePhase && !session.sessionId) {
+				self.log('Session id could not be read from the agent output - the next message starts a fresh conversation.');
 			}
 			session.busy = false;
 			session.proc = null;
@@ -1267,7 +1385,7 @@ class AgentManager {
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
 			}
-			// The text a non-streaming agent produced was held back (see handleLine):
+			// The text a non-streaming agent produced was held back (see handleEvent):
 			// deliver it as one delta first, so a tab that renders the bubble from
 			// deltas gets it whether or not it also reads chat-done.text.
 			// ...as is text the deciding step held back. Not when this step is handing the
@@ -1316,9 +1434,9 @@ class AgentManager {
 
 		proc.on('close', function(code) {
 			if (code !== 0 && !replyText) {
-				self.log('Agent exited ' + code + ': ' + stderrTail);
+				self.log('Agent exited ' + code + ': ' + streamStats.stderrTail);
 				finish(false, 'The local agent exited unexpectedly'
-					+ (lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : '') + '.');
+					+ (lastErrorLine(streamStats.stderrTail) ? ' (' + lastErrorLine(streamStats.stderrTail) + ')' : '') + '.');
 			} else {
 				finish(true, null);
 			}
@@ -1563,9 +1681,12 @@ class AgentManager {
 		}
 		this.compgenProcs.set(key, proc);
 
+		// This turn's MCP ground truth (see handleChat): a clean exit with zero
+		// served calls drew nothing, however healthy the exit code looks.
+		const mcpDelta = this._mcpCounter(hub, tab.projectid);
+
 		var openSteps = {};
 		var stepCounter = 0;
-		var buf = '';
 		var toolCalled = false;
 		// File-delivered prompts (Windows large-prompt path): the agent's first tool call
 		// is the read that fetches the prompt, not component data. Skip it so it neither
@@ -1603,73 +1724,49 @@ class AgentManager {
 		}, 30000);
 		if (ticker.unref) ticker.unref();
 
-		function handleLine(line) {
-			var events = self.agent.parseLine(line);
-			for (var e = 0; e < events.length; e++) {
-				var ev = events[e];
-				if (ev.type === 'model') {
-					self._noteModel(ev.id, hub);
-				} else if (ev.type === 'tool-start') {
-					if (pendingDeliveryRead && ev.name === deliveryTool) {
-						pendingDeliveryRead = false;
-						if (ev.id) skipIds[ev.id] = true;
-						continue;
-					}
-					toolCalled = true;
-					// Idempotent per tool id: an agent that announces a tool before it
-					// runs (and again when the call is complete) must not open two rows.
-					if (ev.id && openSteps[ev.id]) continue;
-					var stepId = 'cg_' + turnId + '_' + (stepCounter++);
-					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
-					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
-							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
-					lastStepLabel = label;
-					// With partial messages this fires as the model STARTS writing the call,
-					// so from here on the wait belongs to that tool, not to "thinking".
-					doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
-					self.log('  ' + doing + '…');
-					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
-				} else if (ev.type === 'tool-end') {
-					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; continue; }
-					var open = openSteps[ev.id];
-					if (open) {
-						delete openSteps[ev.id];
-						var took = Math.round((Date.now() - open.started) / 1000);
-						self.log('  ' + (ev.ok === false ? 'failed' : 'done') + ' after ' + took + 's');
-						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
-					}
-					doing = 'thinking';
-					lastStepLabel = '';
+		function handleEvent(ev) {
+			if (ev.type === 'model') {
+				self._noteModel(ev.id, hub);
+			} else if (ev.type === 'tool-start') {
+				if (pendingDeliveryRead && ev.name === deliveryTool) {
+					pendingDeliveryRead = false;
+					if (ev.id) skipIds[ev.id] = true;
+					return;
 				}
+				toolCalled = true;
+				// Idempotent per tool id: an agent that announces a tool before it
+				// runs (and again when the call is complete) must not open two rows.
+				if (ev.id && openSteps[ev.id]) return;
+				var stepId = 'cg_' + turnId + '_' + (stepCounter++);
+				openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
+				var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
+						.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+				lastStepLabel = label;
+				// With partial messages this fires as the model STARTS writing the call,
+				// so from here on the wait belongs to that tool, not to "thinking".
+				doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
+				self.log('  ' + doing + '…');
+				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
+			} else if (ev.type === 'tool-end') {
+				if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; return; }
+				var open = openSteps[ev.id];
+				if (open) {
+					delete openSteps[ev.id];
+					var took = Math.round((Date.now() - open.started) / 1000);
+					self.log('  ' + (ev.ok === false ? 'failed' : 'done') + ' after ' + took + 's');
+					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
+				}
+				doing = 'thinking';
+				lastStepLabel = '';
 			}
 		}
 
-		proc.stdout.on('data', function(chunk) {
-			// Volume, not events: while a document-sized tool argument streams in this is
-			// the only thing that moves, and it is what makes the heartbeat meaningful.
-			streamBytes += chunk.length;
-			lastOutputAt = Date.now();
-			buf += chunk.toString();
-			var nl;
-			while ((nl = buf.indexOf('\n')) >= 0) {
-				var line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (line) handleLine(line);
-			}
-		});
-
-		var stderrTail = '';
-		var stderrBuf = '';
-		proc.stderr.on('data', function(d) {
-			stderrTail = (stderrTail + d.toString()).slice(-2000);
-			stderrBuf += d.toString();
-			var nl;
-			while ((nl = stderrBuf.indexOf('\n')) >= 0) {
-				var sline = stderrBuf.slice(0, nl);
-				stderrBuf = stderrBuf.slice(nl + 1);
-				var mdl = self._modelFromStderr(sline);
-				if (mdl) self._noteModel(mdl, hub);
-			}
+		const streamStats = watchTurn(this.agent, proc, {
+			onEvent: handleEvent,
+			onModel: function(m) { self._noteModel(m, hub); },
+			// Volume, not events: while a document-sized tool argument streams in this
+			// is the only thing that moves, and it makes the heartbeat meaningful.
+			onChunk: function(len) { streamBytes += len; lastOutputAt = Date.now(); }
 		});
 
 		var finished = false;
@@ -1677,6 +1774,9 @@ class AgentManager {
 			if (finished) return;
 			finished = true;
 			clearInterval(ticker);
+			// Parse-vs-reality bookkeeping, same as the chat turn: a blind parser is
+			// reported once instead of silently degrading component turns.
+			self._noteTurnHealth(streamStats, mcpDelta(), true);
 			// One closing line with what the turn actually cost, so a slow component is
 			// something you can see rather than something you have to time by hand.
 			var totalSecs = Math.round((Date.now() - turnStart) / 1000);
@@ -1712,10 +1812,22 @@ class AgentManager {
 		});
 
 		proc.on('close', function(code) {
-			if (code !== 0 && !toolCalled) {
-				self.log('Component AI exited ' + code + ': ' + stderrTail);
+			// The exit code and the parsed events are both vendor-shaped; the served
+			// MCP calls are not. A crash after the draw landed is still a drawn
+			// component, and a clean exit that never reached the bridge drew nothing.
+			const mcpServed = mcpDelta();
+			if (code !== 0 && !toolCalled && mcpServed === 0) {
+				self.log('Component AI exited ' + code + ': ' + streamStats.stderrTail);
 				finish(false, 'The local agent exited unexpectedly'
-					+ (lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : '') + '.', true);
+					+ (lastErrorLine(streamStats.stderrTail) ? ' (' + lastErrorLine(streamStats.stderrTail) + ')' : '') + '.', true);
+			} else if (code === 0 && !isFill && mcpServed === 0) {
+				// Draw-new turns (convert, create-similar, prompt box) have no armed
+				// capture to say "nothing arrived", so this is their ground-truth
+				// check: a clean exit with zero calls served means nothing was drawn,
+				// and the client should fall back to MockFlow AI rather than believe
+				// a phantom success. (Fill turns are covered by stillArmed below.)
+				self.log('Component AI finished but no board call reached the bridge - falling back.');
+				finish(false, 'The local agent finished without drawing anything on the board.', true);
 			} else {
 				finish(true, null, false);
 			}
@@ -1912,24 +2024,33 @@ class AgentManager {
 		}
 		this.imageProcs.set(key, proc);
 
-		var stderrTail = '';
-		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
-		// The agent's own output is not needed here: the draw happens through the
-		// MCP loopback, and the tab reports its own progress while it generates.
-		proc.stdout.on('data', function() {});
+		// The agent's own events are not needed here - the draw happens through the
+		// MCP loopback and the tab reports its own progress - but the shared loop
+		// still watches the streams: it keeps the stderr tail for the error message
+		// and the parse stats that keep runtime health honest.
+		const mcpDelta = this._mcpCounter(hub, tab.projectid);
+		const streamStats = watchTurn(this.agent, proc, {
+			onModel: function(m) { self._noteModel(m, hub); }
+		});
 
 		const done = function(ok, error) {
 			self.imageProcs.delete(key);
 			hub.selectedProjectId = prevSelected;
 			// This answer belonged to this piece of work, like every other turn.
 			hub.setImageChoice(tab.projectid, undefined);
+			self._noteTurnHealth(streamStats, mcpDelta(), true);
 			send({ t: 'plan-done', ok: ok, error: error || null, doneText: ok ? 'Images added.' : null });
 		};
 		proc.on('error', function(err) { done(false, 'Local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
+			// The re-render only exists as an MCP call: a clean exit that never
+			// reached the bridge added no images, whatever the exit code says.
+			if (code === 0 && mcpDelta() === 0) {
+				return done(false, 'The local agent finished without re-rendering the component.');
+			}
 			if (code === 0) return done(true, null);
 			done(false, 'The local agent stopped before adding the images'
-				+ (lastErrorLine(stderrTail, 160) ? ' (' + lastErrorLine(stderrTail, 160) + ')' : '') + '.');
+				+ (lastErrorLine(streamStats.stderrTail, 160) ? ' (' + lastErrorLine(streamStats.stderrTail, 160) + ')' : '') + '.');
 		});
 	}
 
@@ -2065,6 +2186,11 @@ class AgentManager {
 		const batchStarted = Date.now();
 		var agentMs = 0;
 
+		// Batch-level MCP ground truth: every lane draws on this one board, so the
+		// batch's served-call delta says whether ANY call reached the bridge even
+		// when every lane's stdout parsed to nothing (see finishBatch).
+		const mcpBatch = this._mcpCounter(hub, tab.projectid);
+
 		// What the batch turns will actually be served: the hub value is what
 		// mcpEndpoint reads for every render in this batch, so if it disagrees with
 		// plan.withImages the answer was lost between the picker and here.
@@ -2078,32 +2204,52 @@ class AgentManager {
 		const finishBatch = function() {
 			self.planProcs.delete(key);
 			hub.selectedProjectId = prevSelected;
+			// The board's own count of landed items, read BEFORE the plan is cleared.
+			// This is the authority when the vendors' stdout events disagree with
+			// reality: _notePlannedDraw counted every draw that actually happened,
+			// so a batch whose parsers went blind is still judged on what exists.
+			const hubPlan = (typeof hub.planDone === 'function') ? hub.planDone(tab.projectid) : null;
+			const hubDrawn = hubPlan ? hubPlan.done : 0;
+			const mcpServedBatch = mcpBatch();
 			// Leftover plan count means an item never landed - drop the plan so it
 			// never re-arranges a later, unrelated batch.
 			hub.clearPlan(tab.projectid);
 			// This batch's image answer dies with it (see the chat path).
 			hub.setImageChoice(tab.projectid, undefined);
 
+			const drawnEffective = Math.max(drawnItems, hubDrawn);
+			const startedEffective = Math.max(startedSteps, hubDrawn, mcpServedBatch > 0 ? 1 : 0);
+			if (hubDrawn > drawnItems) {
+				self.log('[plan] the board counted ' + hubDrawn + ' landed item(s) while the agent output showed '
+					+ drawnItems + ' - the output format was not fully readable; judging by the board.');
+			}
+
 			var ok = true;
 			var error = null;
-			if (startedSteps === 0 && crashedTurns > 0) {
+			if (startedEffective === 0 && crashedTurns > 0) {
 				ok = false;
 				error = 'The board could not be generated' + (lastError ? ' (' + lastError + ')' : '') + '.';
-			} else if (startedSteps === 0) {
-				// Every turn exited cleanly without ever calling a board tool. On Windows
-				// this is the tell-tale of a plan prompt that overflowed the cmd.exe
-				// command line and dropped --mcp-config. Report it instead of the phantom
-				// success the exit codes alone would imply.
+			} else if (startedEffective === 0) {
+				// Every turn exited cleanly, no board call reached the bridge and no
+				// tool event was read: nothing happened. On Windows this is the
+				// tell-tale of a plan prompt that overflowed the cmd.exe command line
+				// and dropped --mcp-config. Report it instead of the phantom success
+				// the exit codes alone would imply. (A batch whose draws really landed
+				// can no longer end up here - the served-call count vouches for it.)
 				ok = false;
 				error = 'The agent finished but none of the ' + items.length + ' planned components were drawn. '
 					+ 'If this is Windows with a large board plan, the plan may have exceeded the command-line '
 					+ 'limit - try fewer or smaller items, or update the bridge.';
-			} else if (drawnItems === 0) {
+			} else if (drawnEffective === 0) {
 				// Every render call came back refused. The turns themselves may have
 				// exited cleanly, so only the draw results say the board is empty.
 				ok = false;
 				error = 'The agent called the render tools but every component was refused, '
 					+ 'so nothing was drawn.';
+			} else if (drawnEffective >= items.length && crashedTurns === 0) {
+				// Everything the user confirmed is on the board. Lanes whose stdout
+				// could not be read reported themselves failed, but the board says
+				// otherwise - and the board is what the user asked for.
 			} else if (failedTurns > 0) {
 				// Partially drawn: the items that did land are on the board and stay
 				// there, which is the whole reason each one runs on its own.
@@ -2114,8 +2260,9 @@ class AgentManager {
 			}
 			const wallMs = Date.now() - batchStarted;
 			self.log('[plan] generate ' + (ok ? 'finished' : 'ended incomplete') + ' for "' + (tab.title || key)
-				+ '": ' + drawnItems + ' of ' + items.length + ' item(s) drawn from '
-				+ startedSteps + ' render call(s), ' + failedTurns + ' of ' + groups.length + ' turn(s) failed');
+				+ '": ' + drawnEffective + ' of ' + items.length + ' item(s) drawn from '
+				+ startedSteps + ' parsed render call(s), ' + mcpServedBatch + ' bridge call(s) served, '
+				+ failedTurns + ' of ' + groups.length + ' turn(s) failed');
 			self.log('[plan] board took ' + (wallMs / 1000).toFixed(1) + 's; the ' + groups.length
 				+ ' agent run(s) spent ' + (agentMs / 1000).toFixed(1) + 's between them'
 				+ (wallMs > 0 ? ' (' + (agentMs / wallMs).toFixed(1) + 'x overlap - 1.0x means they ran one after another)' : ''));
@@ -2245,21 +2392,18 @@ class AgentManager {
 			return setImmediate(function() { finish(''); });
 		}
 
-		var out = '', buf = '';
-		proc.stdout.on('data', function(chunk) {
-			buf += chunk.toString();
-			var nl;
-			while ((nl = buf.indexOf('\n')) >= 0) {
-				var line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (!line) continue;
-				const events = self.agent.parseLine(line);
-				for (var e = 0; e < events.length; e++)
-					if (events[e].type === 'text') out += events[e].text;
-			}
+		var out = '';
+		const streamStats = watchTurn(this.agent, proc, {
+			onEvent: function(ev) { if (ev.type === 'text') out += ev.text; }
 		});
 		proc.on('error', function() { finish(''); });
-		proc.on('close', function() { finish(out); });
+		proc.on('close', function() {
+			// No board calls are expected here (the step only writes facts), so the
+			// stats can only ever clear or streak-count a blind parser, never
+			// convict one on their own - see runtimeHealth.assessTurn.
+			self._noteTurnHealth(streamStats, 0, true);
+			finish(out);
+		});
 	}
 
 	_runPlanTurn(ctx, indices, laneId, done) {
@@ -2384,6 +2528,11 @@ class AgentManager {
 		}
 		ctx.procs.push(proc);
 		const turnStarted = Date.now();
+		// Lane-scoped MCP delta. Lanes overlap on one board, so another lane's
+		// calls can leak into this reading - it is used only to enrich the runtime
+		// health record, never to pass a lane that parsed nothing (the BATCH
+		// verdict owns that call, from the board's own landed-item count).
+		const mcpLane = self._mcpCounter(ctx.hub, tab.projectid);
 
 		// Timeline rows for this turn. Same step contract as the chat turn
 		// (renderTimelineStep in the tab), so the local batch renders with the same
@@ -2393,7 +2542,6 @@ class AgentManager {
 		var drawnSteps = 0;    // ...of which came back drawn
 		var failedSteps = 0;   // ...and came back refused (bad arguments, tab error)
 		var itemCursor = 0;
-		var buf = '';
 		// When the prompt was delivered as a file (Windows large-plan path), the agent's
 		// first tool call is the read that fetches it - not a rendered item. Skip that one
 		// call so it neither steals the first item's timeline row nor counts as a render.
@@ -2421,44 +2569,35 @@ class AgentManager {
 			});
 		}
 
-		function handleLine(line) {
-			var events = self.agent.parseLine(line);
-			for (var e = 0; e < events.length; e++) {
-				var ev = events[e];
-				if (ev.type === 'tool-start') {
-					if (pendingDeliveryRead && ev.name === deliveryTool) {
-						pendingDeliveryRead = false;
-						if (ev.id) skipIds[ev.id] = true;
-						continue;
-					}
-					startStep(ev.id, ev.name);
-				} else if (ev.type === 'tool-end') {
-					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; continue; }
-					var open = openSteps[ev.id];
-					if (!open) continue;
-					delete openSteps[ev.id];
-					if (ev.ok) drawnSteps++; else failedSteps++;
-					self.log('[plan] step end: "' + (open.name || open.stepId) + '" '
-						+ (ev.ok ? 'ok' : 'FAILED') + ' in ' + (Date.now() - open.started) + 'ms');
-					send({
-						t: 'plan-step',
-						step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
-					});
+		function handleEvent(ev) {
+			if (ev.type === 'model') {
+				self._noteModel(ev.id, ctx.hub);
+			} else if (ev.type === 'tool-start') {
+				if (pendingDeliveryRead && ev.name === deliveryTool) {
+					pendingDeliveryRead = false;
+					if (ev.id) skipIds[ev.id] = true;
+					return;
 				}
+				startStep(ev.id, ev.name);
+			} else if (ev.type === 'tool-end') {
+				if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; return; }
+				var open = openSteps[ev.id];
+				if (!open) return;
+				delete openSteps[ev.id];
+				if (ev.ok) drawnSteps++; else failedSteps++;
+				self.log('[plan] step end: "' + (open.name || open.stepId) + '" '
+					+ (ev.ok ? 'ok' : 'FAILED') + ' in ' + (Date.now() - open.started) + 'ms');
+				send({
+					t: 'plan-step',
+					step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started }
+				});
 			}
 		}
 
-		proc.stdout.on('data', function(chunk) {
-			buf += chunk.toString();
-			var nl;
-			while ((nl = buf.indexOf('\n')) >= 0) {
-				var line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (line) handleLine(line);
-			}
+		const streamStats = watchTurn(this.agent, proc, {
+			onEvent: handleEvent,
+			onModel: function(m) { self._noteModel(m, ctx.hub); }
 		});
-		var stderrTail = '';
-		proc.stderr.on('data', function(d) { stderrTail = (stderrTail + d.toString()).slice(-2000); });
 
 		// Backstop: a hung turn never pins the board's plan forever.
 		const killer = setTimeout(function() {
@@ -2474,6 +2613,7 @@ class AgentManager {
 			if (settled) return;
 			settled = true;
 			clearTimeout(killer);
+			self._noteTurnHealth(streamStats, mcpLane(), true);
 			var at = ctx.procs.indexOf(proc);
 			if (at !== -1) ctx.procs.splice(at, 1);
 			// Close any dangling rows so the tab's timeline never spins forever.
@@ -2488,7 +2628,7 @@ class AgentManager {
 				+ ' item(s) drawn'
 				+ (stepCounter !== drawnSteps
 					? ' (' + stepCounter + ' render call(s), ' + failedSteps + ' refused)' : '')
-				+ (!ok && lastErrorLine(stderrTail) ? ' (' + lastErrorLine(stderrTail) + ')' : ''));
+				+ (!ok && lastErrorLine(streamStats.stderrTail) ? ' (' + lastErrorLine(streamStats.stderrTail) + ')' : ''));
 			// More components than the turn was asked for: the agent drew past its own
 			// item. The board keeps them (they are real components the user can delete),
 			// but the plan does not count them - see boardHub._notePlannedDraw.
@@ -2502,11 +2642,15 @@ class AgentManager {
 
 		proc.on('error', function(err) { finish('failed to run', false, false, 'local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
-			// Nothing drawn is a failure however clean the exit: the caller turns a
-			// batch that drew nothing at all into the command-line-limit message.
+			// Nothing PARSED as drawn is still reported failed here, even when the
+			// draws may in fact have landed with an unreadable output format: the
+			// lane-level MCP reading cannot tell this lane's calls from an
+			// overlapping lane's. The batch verdict (finishBatch) re-judges from the
+			// board's own landed-item count and forgives these lanes when every
+			// confirmed item exists.
 			if (code === 0 && stepCounter > 0) return finish('finished', true, true, null);
-			if (code === 0) return finish('finished without drawing anything', false, true, null);
-			finish('exited ' + code, false, false, lastErrorLine(stderrTail, 160) || null);
+			if (code === 0) return finish('finished without drawing anything the bridge could read', false, true, null);
+			finish('exited ' + code, false, false, lastErrorLine(streamStats.stderrTail, 160) || null);
 		});
 	}
 

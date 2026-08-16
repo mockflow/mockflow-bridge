@@ -273,6 +273,13 @@ async function start(opts) {
 	const healthProblems = picked.agent
 		? agentHealth.problems([agentHealth.checkOne(picked.agent)])
 		: [];
+	// ...plus what LIVE turns learned in earlier runs (agents/runtimeHealth): a
+	// parser that went blind against the installed CLI is reported at the next
+	// boot too, not just in the turn that discovered it.
+	if (picked.agent) {
+		require('./agents/runtimeHealth').problems(picked.agent)
+			.forEach(function (p) { healthProblems.push(p); });
+	}
 	const updateCheck = require('./updateCheck');
 
 	function stopServices() {
@@ -433,6 +440,16 @@ async function start(opts) {
 				lines.push(paint.bold(p.label + ' ' + p.installed) + ' is newer than the tested '
 					+ p.tested + '.');
 				lines.push(paint.dim('  Turns may misbehave; re-run test/fake-*.js, then bump testedVersion.'));
+			} else if (p.kind === 'runtime') {
+				if (p.parserBlind) {
+					lines.push(paint.bold(p.label + ' — output format not recognized in live turns')
+						+ (p.version ? paint.dim(' (v' + p.version + ')') : ''));
+					lines.push(paint.dim('  Board work still completes; replies, progress and session memory are '
+						+ 'degraded. Update mockflow-bridge.'));
+				} else {
+					lines.push(p.label + ': tool progress events not recognized in live turns'
+						+ paint.dim(' — timeline rows may be missing.'));
+				}
 			} else {
 				lines.push(paint.bold(p.label) + ' parser canary failed:');
 				p.failures.forEach(function (f) { lines.push(paint.dim('  ' + f)); });

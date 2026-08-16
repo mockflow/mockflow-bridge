@@ -45,6 +45,31 @@
  * still works - agentManager falls back to prompt-level restriction, a fresh
  * session, or a single final chunk.
  *
+ * WHAT AN ADAPTER MUST GET RIGHT vs WHAT MAY DEGRADE
+ * --------------------------------------------------
+ * Turn success is judged against the MCP calls the bridge itself served
+ * (boardHub.noteToolServed / agentManager._mcpCounter), NOT against parseLine.
+ * That splits the contract into two tiers:
+ *
+ *   load-bearing  detect(), buildArgs() (launch + MCP wiring + allowlist) and
+ *                 spawn(). If these are right, turns draw and are verified,
+ *                 whatever happens to the output stream.
+ *   best-effort   parseLine()/parseStderr() feed the UX: streamed replies,
+ *                 timeline rows, the model label, the resume session id. A
+ *                 vendor changing its output format degrades these (held
+ *                 replies, missing rows, fresh sessions) and is DETECTED -
+ *                 agents/runtimeHealth.js counts lines-seen vs events-parsed
+ *                 per live turn, flags a blind parser in the activity log, the
+ *                 dashboard and the next boot's banner - but it no longer
+ *                 fails the turn or fakes a success.
+ *
+ * The stream plumbing itself (buffering, stderr scanning, the stats) lives
+ * once in agents/turnRunner.js; adapters only translate one line to events.
+ * When a vendor DOES drift, the fix is usually one of three one-file edits:
+ * parseLine (output shape), buildArgs (flag/config key - also updatable
+ * without a publish via the catalog's agentWiring override, src/catalog.js),
+ * or testedVersion + fixtures after re-verifying live.
+ *
  * SELECTION
  * ---------
  * --agent <id> / MFBRIDGE_AGENT  ->  saved choice  ->  the only one installed
@@ -61,10 +86,21 @@ const config = require('../config');
 // emits and exposed no board tools at all, and nothing said so until a live
 // turn ran. Add a new one only after chat, a resumed turn and a component turn
 // have each been seen drawing on a real board (test/fake-*.js).
+// (The MCP-served cross-check now catches the draws-nothing case at runtime
+// and a blind parser only degrades the UX - but that lowers the cost of a
+// mistake, not the bar for listing: the live battery still runs first.)
 const AGENTS = [
 	require('./claude'),
 	require('./codex'),
 	require('./opencode'),
+	// Universal tier (see ./universal.js): any MCP-capable CLI from an
+	// orca-sized config - launch command + prompt flag - judged by the MCP
+	// calls the bridge serves rather than by a per-vendor output parser.
+	// Registered AFTER the full adapters so auto-select prefers the premium
+	// tier, and labelled "(basic)" / "(experimental)" so every picker and
+	// hint shows the tier honestly next to the well-tested entries.
+	require('./universal').gemini,
+	require('./universal').cursor,
 	// BridgeAI (our own OpenAI-compatible agent) is LAST and only "available" when
 	// a provider key is set, so it never disturbs the CLI agents' auto-select.
 	require('../bridgeai')
