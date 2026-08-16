@@ -1584,12 +1584,22 @@ class AgentManager {
 		var streamBytes = 0;
 		var lastOutputAt = Date.now();
 		var doing = 'thinking';
+		var lastStepLabel = '';
 		var ticker = setInterval(function() {
 			var secs = Math.round((Date.now() - turnStart) / 1000);
 			var quiet = Math.round((Date.now() - lastOutputAt) / 1000);
 			self.log('  … ' + doing + ' (' + (secs >= 60 ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's' : secs + 's')
 				+ (streamBytes ? ', ' + Math.round(streamBytes / 1024) + 'KB received' : '')
 				+ (quiet >= 60 ? ', nothing for ' + Math.round(quiet / 60) + 'm' : '') + ')');
+			// Same liveness signal to the TAB: the tool's start step is minutes old by
+			// now, so refresh the component's loading-overlay label with the received
+			// byte count. Only once a tool is in flight or bytes stream — the initial
+			// "thinking" stretch keeps the overlay's own opening caption. Old editors
+			// route this into a no-op onStep handler, so it degrades harmlessly.
+			if (lastStepLabel || streamBytes) {
+				var tabLabel = (lastStepLabel || 'Working') + (streamBytes ? ' — ' + Math.round(streamBytes / 1024) + ' kB' : '');
+				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: 'cg_live_' + turnId, phase: 'start', tool: 'liveness', label: tabLabel } });
+			}
 		}, 30000);
 		if (ticker.unref) ticker.unref();
 
@@ -1613,6 +1623,7 @@ class AgentManager {
 					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
 					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
 							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+					lastStepLabel = label;
 					// With partial messages this fires as the model STARTS writing the call,
 					// so from here on the wait belongs to that tool, not to "thinking".
 					doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
@@ -1628,6 +1639,7 @@ class AgentManager {
 						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
 					}
 					doing = 'thinking';
+					lastStepLabel = '';
 				}
 			}
 		}
