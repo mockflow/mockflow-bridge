@@ -972,8 +972,19 @@ class AgentManager {
 		// question, neither of which this tier can carry. Its turns run straight
 		// to compose with imagery defaulting to off (the safe, free choice).
 		const parserless = !!this.agent.capabilities.parserless;
-		const declarePhase = frame.__phase !== 'compose' && !parserless;
-		hub.setTurnPhase(tab.projectid, declarePhase ? 'declare' : 'compose');
+		// A UTILITY turn (frame.utility — e.g. Mida's quicksetup form design):
+		// a background one-shot whose reply the tab parses itself, not a
+		// conversation and never a draw. It skips the decide-then-draw
+		// machinery and every persona/imagery/workspace framing (prose around
+		// the instruction is exactly what corrupts a strict-format reply),
+		// keeps the phase at 'declare' so no render tool is reachable, and
+		// neither resumes a session nor records history. A bridge without
+		// this branch still serves these turns — they fall into the declare
+		// step and answer via its "none" path — this just stops that framing
+		// from fighting the utility instruction.
+		const utilityTurn = !!frame.utility;
+		const declarePhase = frame.__phase !== 'compose' && !parserless && !utilityTurn;
+		hub.setTurnPhase(tab.projectid, (declarePhase || utilityTurn) ? 'declare' : 'compose');
 		// The user's OWN words, for the whole turn (both steps). Some components may
 		// only be chosen when the request asks for them in so many words, and that is
 		// judged against this - never against the agent's paraphrase, which turns a
@@ -1002,7 +1013,7 @@ class AgentManager {
 		// just gave, and the component the deciding step settled on. Held apart from
 		// the persona because an agent whose system prompt applies only when a session
 		// is CREATED has to be given them another way - see turnInstructionsInMessage.
-		var turnInstructions = this._openImageTurn(hub, tab, frame, parserless ? false : undefined);
+		var turnInstructions = utilityTurn ? '' : this._openImageTurn(hub, tab, frame, parserless ? false : undefined);
 		// The drawing step of a decide-then-draw turn: the choice was already made (and
 		// the user answered the imagery question about THAT choice), so it is stated
 		// rather than left to be made a second time from the bare request.
@@ -1064,6 +1075,14 @@ class AgentManager {
 			// it: its own framing above is the whole instruction.
 			turnInstructions = '';
 		}
+		// A utility one-shot gets the leanest possible framing: no persona, no
+		// research guidance — the message itself is the whole instruction, and
+		// any surrounding prose is what corrupts a strict-format reply.
+		if (utilityTurn) {
+			systemPrompt = 'You run background utility requests for a whiteboard design app. Follow the '
+				+ 'instructions in the message exactly: call no tools, draw nothing, and reply with only '
+				+ 'what the message asks for.';
+		}
 		// Where this turn's own instructions go. In the system prompt for an agent that
 		// applies one per run; otherwise they ride the message (below), because a system
 		// prompt that only lands when a session is created would deliver them once and
@@ -1071,13 +1090,13 @@ class AgentManager {
 		const turnInstructionsInMessage = !!turnInstructions
 			&& this.agent.capabilities.systemPromptPerTurn === false;
 		if (turnInstructions && !turnInstructionsInMessage) systemPrompt += turnInstructions;
-		if (!this._workspaceEnabled(tab) && !frame.attachment) {
+		if (!utilityTurn && !this._workspaceEnabled(tab) && !frame.attachment) {
 			systemPrompt += ' You currently have no access to the user\'s files (no workspace is set). '
 				+ 'If they ask you to read their local files, code, repo, docs or transcripts, briefly tell '
 				+ 'them to restart the bridge with --workspace <path> to enable it, and reassure them their '
 				+ 'files are never uploaded: only what you draw is sent to MockFlow, and the reading and '
 				+ 'thinking happen on their own machine.';
-		} else if (this._workspaceEnabled(tab)) {
+		} else if (!utilityTurn && this._workspaceEnabled(tab)) {
 			// The turn already RUNS in the workspace, but nothing said so: without this
 			// the agent treats "my project" / "this folder" as words in a prompt and
 			// draws from imagination instead of reading what is actually there.
@@ -1138,7 +1157,7 @@ class AgentManager {
 		// modify, a convert) never reaches the CLI session at all. A drawing step
 		// that resumes the real session already carries its own history, so the
 		// record is left out there rather than said twice.
-		const composeResumes = !declarePhase && canResume && !!session.sessionId;
+		const composeResumes = !declarePhase && !utilityTurn && canResume && !!session.sessionId;
 		if (!composeResumes) {
 			const record = this._historyBlock(key);
 			if (record) turnText = record + '\n\n' + turnText;
@@ -1423,7 +1442,9 @@ class AgentManager {
 			// modify) ends at its deciding step and records here too; a drawing turn
 			// records once, at its drawing step's own finish, with the notes both
 			// steps left.
-			self._recordTurn(key, hub, tab.projectid, text, replyText);
+			// Utility one-shots are not conversation: recording them would feed
+			// stale form designs back into later turns on the same surface.
+			if (!utilityTurn) self._recordTurn(key, hub, tab.projectid, text, replyText);
 			sendToTab({ t: 'chat-done', id: turnId, ok: ok, text: replyText, error: error, model: self.currentModel || null });
 		}
 
