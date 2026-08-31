@@ -1197,6 +1197,17 @@ class AgentManager {
 		// Snapshot the bridge-served MCP call count before the agent can make one:
 		// finish() reads the delta as this turn's ground truth.
 		const mcpDelta = this._mcpCounter(hub, tab.projectid);
+		// ...and the served NAMES, so finish() can catch one specific call the
+		// agent visibly started but the bridge never received - a headless
+		// permission denial inside the agent's own CLI, which the user cannot
+		// see and cannot approve (the "approve the tool permission prompt"
+		// dead end a tester hit on plan_board).
+		const servedNamesBase = (typeof hub.toolServedNames === 'function')
+			? hub.toolServedNames(tab.projectid).length : 0;
+		const servedNamesDelta = function() {
+			return (typeof hub.toolServedNames === 'function')
+				? hub.toolServedNames(tab.projectid).slice(servedNamesBase) : [];
+		};
 
 		var proc;
 		try {
@@ -1224,6 +1235,10 @@ class AgentManager {
 		// this against the bridge-served count: seen here but served nowhere means
 		// the calls went to a different MockFlow connection or were denied.
 		var sawBoardTool = false;
+		// WHICH board tools were seen starting, for the per-name check: one
+		// denied call among served ones (plan_board blocked while reads landed)
+		// is invisible to the count alone.
+		var seenBoardTools = {};
 		// Both steps of a decide-then-draw turn report into the SAME tab turn, and the
 		// drawing step is a fresh process whose counter starts at 0 again - so the phase
 		// goes in the id, or its first tool row lands on top of the deciding step's row.
@@ -1304,7 +1319,10 @@ class AgentManager {
 					sendToTab({ t: 'chat-delta', id: turnId, text: replyText });
 				}
 			} else if (ev.type === 'tool-start') {
-				if (self._looksLikeBoardTool(ev.name)) sawBoardTool = true;
+				if (self._looksLikeBoardTool(ev.name)) {
+					sawBoardTool = true;
+					seenBoardTools[bareToolName(ev.name)] = true;
+				}
 				startStep(ev.id, ev.name);
 			} else if (ev.type === 'tool-end') {
 				// Answered before its row was due: a denial, or a tool that took no
@@ -1358,6 +1376,27 @@ class AgentManager {
 				error = 'The agent called its board tools, but none of the calls reached this board. It may '
 					+ 'have drawn into a different MockFlow connection (another bridge, or a hosted MockFlow '
 					+ 'app), or the calls were denied. Nothing changed on this board.';
+			}
+			// The partial flavor of the same failure: SOME calls landed, but a
+			// specific board tool the agent visibly started never arrived - its
+			// own CLI denied it with a permission prompt no one can see or
+			// approve (bridge turns run headless). Without this, the agent
+			// narrates the blocked call as done ("review the list and click
+			// Generate Board") over a board that never received it. Said as a
+			// real error, with the fix, instead of the agent's dead-end advice.
+			if (ok && !error && sawBoardTool && tab.projectid) {
+				const servedNow = servedNamesDelta();
+				const blockedNames = Object.keys(seenBoardTools).filter(function(n) {
+					return servedNow.indexOf(n) === -1;
+				});
+				if (blockedNames.length) {
+					ok = false;
+					error = 'The agent tried to use ' + blockedNames.join(', ') + ', but the call never reached '
+						+ 'this board - the agent\'s own CLI blocked it asking for a permission that cannot be '
+						+ 'shown or approved here. To fix it: run the "Add to your agent" command from the '
+						+ 'bridge terminal\'s startup box once more (the MockFlow connection must be named '
+						+ '"mockflow"), then restart the bridge and try again.';
+				}
 			}
 			// The agent exited cleanly but the whole turn is unobservable: no board
 			// calls arrived AND its output parsed to nothing. That is not a success

@@ -525,8 +525,10 @@ class McpEndpoint {
 
 		// Ground truth for the turn's verdict: this call REACHED the bridge,
 		// whatever the agent's own output stream says about it. Counted before
-		// dispatch on purpose - see hub.noteToolServed.
-		if (typeof this.hub.noteToolServed === 'function') this.hub.noteToolServed(board);
+		// dispatch on purpose - see hub.noteToolServed. The name rides along so
+		// a turn can tell WHICH of the calls it saw starting never arrived (a
+		// headless permission denial in the agent's own CLI).
+		if (typeof this.hub.noteToolServed === 'function') this.hub.noteToolServed(board, name);
 
 		try {
 			switch (name) {

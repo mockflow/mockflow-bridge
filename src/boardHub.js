@@ -100,6 +100,7 @@ class BoardHub {
 		// read the delta (agentManager), so nothing here needs a turn boundary.
 		this.toolServedTotal = 0;
 		this.toolServedByBoard = new Map(); // projectid -> count
+		this.toolServedNamesByBoard = new Map(); // projectid -> served tool names (capped, monotonic)
 
 		// One pairing code per daemon run, printed on the console. A tab that
 		// presents it gets a durable token (persisted, survives restarts).
@@ -879,16 +880,34 @@ class BoardHub {
 	 * counts. A call with no board scope is attributed to the selected board,
 	 * which every agent turn pins to itself for its duration.
 	 */
-	noteToolServed(projectid) {
+	noteToolServed(projectid, name) {
 		this.toolServedTotal++;
 		const key = projectid || this.selectedProjectId || '';
 		this.toolServedByBoard.set(key, (this.toolServedByBoard.get(key) || 0) + 1);
+		// The NAMES too, monotonic like the count: a turn snapshots the length
+		// and reads its own slice. This is what lets a turn tell "the agent's
+		// CLI denied plan_board headlessly" apart from "the turn went fine" -
+		// the count alone cannot see one blocked call among served ones.
+		// Never trimmed: a snapshot is an index into this array, and shifting
+		// entries out from under an open turn would misread its slice. Tool
+		// names are short strings - a daemon would have to serve hundreds of
+		// thousands of calls before this is even megabytes.
+		if (name) {
+			var names = this.toolServedNamesByBoard.get(key);
+			if (!names) { names = []; this.toolServedNamesByBoard.set(key, names); }
+			names.push(String(name));
+		}
 	}
 
 	/** Monotonic served-call count for one board (or the global total). */
 	toolServedCount(projectid) {
 		if (!projectid) return this.toolServedTotal;
 		return this.toolServedByBoard.get(projectid) || 0;
+	}
+
+	/** Monotonic served-call NAME list for one board (see noteToolServed). */
+	toolServedNames(projectid) {
+		return (projectid && this.toolServedNamesByBoard.get(projectid)) || [];
 	}
 
 	/**
