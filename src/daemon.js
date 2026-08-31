@@ -81,6 +81,9 @@ async function start(opts) {
 	// is answered) the drawing step of that same chat turn runs.
 	hub.onDeclared = function(projectid, tool, held) { agents.noteDeclared(projectid, tool, held); };
 	hub.onCompose = function(projectid, cancelled) { agents.resumeCompose(projectid, cancelled); };
+	// An intake-eligible turn declared a draw: end the tab turn and hand it back
+	// to the tab for the quicksetup form (the tab re-sends with the answers).
+	hub.onIntakeAsk = function(projectid, info) { agents.noteIntakeAsk(projectid, info); };
 
 	// Reported to the editor tab on connect so Mida can educate the user honestly
 	// (only offer "brainstorm your files" when a workspace is actually set).

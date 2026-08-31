@@ -574,7 +574,25 @@ class McpEndpoint {
 							+ 'a local file. Declare render_wireframelite instead - it works fully here - and tell the '
 							+ 'user that a clickable prototype needs a cloud project.');
 					}
+					// Quicksetup gate, the local mirror of MockFlow AI's intake pause:
+					// the tab flagged this turn as bare enough for the setup form, and
+					// the choice just made says it IS a draw - so the turn ends here
+					// and the tab shows the form (it designs the questions on the
+					// user's own agent, then re-sends the message with the answers
+					// folded in). Chat never reaches this: a "hi" declares "none"
+					// above and is answered normally, which is exactly the MockFlow AI
+					// behavior. The manager ends the turn and sends the intake-ask
+					// frame; see agentManager.finish.
+					const intakeArmed = (typeof this.hub.getTurnIntake === 'function')
+						? this.hub.getTurnIntake(board) : null;
 					if (want === 'plan') {
+						if (intakeArmed) {
+							this.hub.noteIntakeAsk(board, { mode: 'multi', tool: 'plan', label: 'board plan' });
+							return this._ok('Noted: several components. The user is being shown a quick setup '
+								+ 'form first, and the request continues from their answers by itself. YOUR STEP '
+								+ 'IS OVER: call nothing else and write nothing at all. Nothing has failed and '
+								+ 'nothing is missing.');
+						}
 						// No single component covers the request, so this turn draws a batch. The
 						// drawing step gets the full catalog and proposes it with plan_board. Imagery
 						// is not asked here: the plan picker carries its own toggle, next to the list
@@ -628,6 +646,19 @@ class McpEndpoint {
 					const dLabel = dEntry.planUILabel || dEntry.planUIType
 						|| declared.replace(/^render_/, '').replace(/_/g, ' ');
 					const self4 = this;
+					// Quicksetup gate for a single declared component (see the plan
+					// branch above). Before noteDeclared on purpose - the turn ends
+					// at the form instead of holding for a drawing step - and before
+					// the imagery ask too: the form carries its own image toggle for
+					// the types that want one, and two questions for one request is
+					// the double-ask MockFlow AI's gate exists to prevent.
+					if (intakeArmed) {
+						this.hub.noteIntakeAsk(board, { mode: 'single', tool: declared, label: dLabel });
+						return this._ok('Noted: a ' + dLabel + '. The user is being shown a quick setup form '
+							+ 'for it first, and the request continues from their answers by itself. YOUR STEP '
+							+ 'IS OVER: call nothing else and write nothing at all. Nothing has failed and '
+							+ 'nothing is missing.');
+					}
 					// Recorded now, not when the user answers: the deciding step's process
 					// may exit first, and its turn has to stay open for the drawing step.
 					// The held flag travels with it: a correction re-opens the one-component

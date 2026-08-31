@@ -83,6 +83,13 @@ class BoardHub {
 		// a next-turn "convert it" needs to resolve "it".
 		this.turnNotes = new Map();
 		this.turnRequests = new Map(); // projectid -> the user's OWN words for this turn
+		// projectid -> {eligible:true} while the OPEN turn may pause on the Mida
+		// quicksetup form. Armed only by a chat frame that rode `intake` (the tab
+		// judged the message bare enough - no recipe, attachment, plan resume...),
+		// and read at declare_render: a declared draw then hands the turn back to
+		// the tab for the form instead of composing. Same lifetime as
+		// turnRequests - it belongs to one turn's deciding step only.
+		this.turnIntakes = new Map();
 		this.selectedProjectId = null;
 		this.nextId = 1;
 		// MCP tool calls actually SERVED, counted at the endpoint's front door.
@@ -1274,6 +1281,39 @@ class BoardHub {
 	getTurnRequest(projectid) {
 		const key = projectid || null;
 		return (key && this.turnRequests.get(key)) || '';
+	}
+
+	/**
+	 * Whether the OPEN turn on this board may pause on the quicksetup form.
+	 *
+	 * The tab is the judge of eligibility (it mirrors the server tool gate's
+	 * exemptions - message length, recipes, attachments, plan resumes); the
+	 * bridge only carries the flag to the deciding step, where declare_render
+	 * turns a declared draw into an intake-ask instead of a compose. Empty for
+	 * every turn that did not ride the flag, so old clients and every non-chat
+	 * path behave exactly as before.
+	 */
+	setTurnIntake(projectid, info) {
+		const key = projectid || null;
+		if (!key) return;
+		if (info) this.turnIntakes.set(key, info);
+		else this.turnIntakes.delete(key);
+	}
+
+	getTurnIntake(projectid) {
+		const key = projectid || null;
+		return (key && this.turnIntakes.get(key)) || null;
+	}
+
+	/**
+	 * The deciding step declared a draw on an intake-eligible turn: hand the
+	 * turn back to the tab for the quicksetup form. Wired to the agent manager
+	 * by the daemon, like onDeclared - the manager ends the tab turn cleanly
+	 * and THEN sends the intake-ask frame, so the tab's single chat slot is
+	 * free for the form's own design turn.
+	 */
+	noteIntakeAsk(projectid, info) {
+		if (this.onIntakeAsk) this.onIntakeAsk(projectid || null, info || {});
 	}
 
 	/**

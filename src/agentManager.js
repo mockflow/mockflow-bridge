@@ -991,6 +991,13 @@ class AgentManager {
 		// plain "create some UI" into whatever it felt like building. Cleared when the
 		// turn really ends (finish), so the next turn is judged on its own words.
 		hub.setTurnRequest(tab.projectid, text);
+		// Whether this turn may pause on the quicksetup form (the tab judged the
+		// message bare enough and rode the flag). Armed for the deciding step
+		// only: a compose re-entry, a utility one-shot and every turn from an
+		// older client leave it clear, so declare_render behaves as before.
+		if (typeof hub.setTurnIntake === 'function') {
+			hub.setTurnIntake(tab.projectid, (declarePhase && frame.intake) ? frame.intake : null);
+		}
 		if (declarePhase) {
 			this.chatPhases.set(key, {
 				tab: tab, frame: frame, sendToTab: sendToTab, hub: hub,
@@ -1395,6 +1402,8 @@ class AgentManager {
 			// steps of a decide-then-draw turn are one turn. Left behind, they would be
 			// judged against a later turn that has words of its own - or none.
 			if (!handingOver) hub.setTurnRequest(tab.projectid, '');
+			// And for the quicksetup arm: it belonged to this turn's deciding step.
+			if (!handingOver && typeof hub.setTurnIntake === 'function') hub.setTurnIntake(tab.projectid, null);
 			// A deferred row must not open after the turn is over, or the timeline
 			// grows a spinner nothing will ever resolve.
 			turnEnded = true;
@@ -1403,6 +1412,32 @@ class AgentManager {
 			// Close any dangling step rows so the timeline never spins forever.
 			for (var k in openSteps) {
 				sendToTab({ t: 'chat-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
+			}
+			// The deciding step declared a draw on an intake-eligible turn: this turn
+			// ends HERE, cleanly, and the tab takes over - it designs the quicksetup
+			// form on its own agent surface and re-sends the message with the answers
+			// folded in (a fresh turn, with the intake flag consumed). Ended before
+			// the intake-ask frame goes out because the tab has ONE chat slot: the
+			// form's design turn can only start once this turn's chat-done has
+			// landed. The declare step's held preamble is dropped (nothing it said
+			// belongs to a turn that drew nothing), and the turn is not recorded -
+			// the re-send carries the same user message, and recording both would
+			// put it in the conversation twice.
+			const phIntake = self.chatPhases.get(key);
+			if (phIntake && phIntake.intakeAsk && !phIntake.declaredNone && ok) {
+				self.chatPhases.delete(key);
+				if (typeof hub.takeTurnNotes === 'function') hub.takeTurnNotes(tab.projectid);
+				self.log('[intake] declared ' + (phIntake.intakeAsk.tool || 'a draw')
+					+ ' on a quicksetup-eligible turn - handing the form to the tab');
+				sendToTab({ t: 'chat-done', id: turnId, ok: true, text: '' });
+				sendToTab({
+					t: 'intake-ask', id: turnId,
+					surface: frame.surface || 'mida',
+					mode: phIntake.intakeAsk.mode || 'single',
+					tool: phIntake.intakeAsk.tool || '',
+					label: phIntake.intakeAsk.label || ''
+				});
+				return;
 			}
 			// The text a non-streaming agent produced was held back (see handleEvent):
 			// deliver it as one delta first, so a tab that renders the bubble from
@@ -1895,6 +1930,7 @@ class AgentManager {
 		const projectid = ph.tab && ph.tab.projectid;
 		if (ph.hub && ph.hub.setTurnRequest) ph.hub.setTurnRequest(projectid, '');
 		if (ph.hub && ph.hub.setImageChoice) ph.hub.setImageChoice(projectid, undefined);
+		if (ph.hub && typeof ph.hub.setTurnIntake === 'function') ph.hub.setTurnIntake(projectid, null);
 		// The notes this turn's steps left belong to a turn that is never finishing:
 		// drain and drop them, or they attach to the NEXT turn's record and put
 		// another turn's search hits under its words. A cancelled turn drew nothing
@@ -1930,6 +1966,21 @@ class AgentManager {
 		// picks the component again from the bare request and can land somewhere else
 		// than the choice the user was just asked about.
 		if (tool) ph.declaredTool = tool;
+	}
+
+	/**
+	 * The deciding step declared a draw on a quicksetup-eligible turn
+	 * (hub.noteIntakeAsk). Recorded on the phase like a declare; acted on in
+	 * finish(), which ends the tab turn and sends the intake-ask frame - the
+	 * ordering that keeps the tab's single chat slot free for the form's own
+	 * design turn. ph.declared is deliberately NOT set: the turn must not be
+	 * held open for a drawing step that is never coming.
+	 */
+	noteIntakeAsk(projectid, info) {
+		const key = this._chatPhaseKey(projectid);
+		const ph = key && this.chatPhases.get(key);
+		if (!ph) return;
+		ph.intakeAsk = info || {};
 	}
 
 	_chatPhaseKey(projectid) {
