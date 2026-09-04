@@ -1076,13 +1076,20 @@ class BoardHub {
 	 * place instead of dropping a second component on the board, and a turn that
 	 * never produces anything still falls back to MockFlow AI (agentManager.finish).
 	 */
-	drawHtml(projectid, toolName, mcpType, args, imagesAllowed) {
+	drawHtml(projectid, toolName, mcpType, args, imagesAllowed, opts) {
 		var key = projectid;
 		if (!key) {
 			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
 		}
 		const cap = key ? this.captures.get(key) : null;
 		const fill = !!(cap && cap.html);
+		// preview_artifact: the tab boots the document and answers with findings; nothing
+		// lands on the board, so it takes no plan slot, never counts as a draw, never
+		// touches the fill capture, and is allowed while a plan pick is pending.
+		if (opts && opts.previewOnly) {
+			const pframe = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {}, imagesAllowed: false, previewOnly: true };
+			return this.runOnBoard(projectid, pframe, config.HTML_TOOL_TIMEOUT_MS, fill ? cap.ws : null);
+		}
 		// Same plan-selection gate as captureOrDraw: never draw past the picker. A
 		// fill-in-place turn edits a component that is already on the board, so it is
 		// not a draw the picker is holding back.

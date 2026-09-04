@@ -95,6 +95,13 @@ function toolCall(toolName, args) {
 function toolResult(toolName, res) {
 	const diag = res && res.diagnostics;
 	if (!diag) return '';
+	// An artifact conversion carries only warnings (boot + lint findings): no paint
+	// objects, captures or icon counts to summarize — printing those fields as
+	// "undefined" buried the warnings the agent needed to read.
+	if (diag.paintObjectCount === undefined && diag.captureMode === undefined) {
+		if (config.DEBUG) (diag.warnings || []).forEach(function(w) { log('DEBUG ' + toolName + ': WARNING ' + w); });
+		return (diag.warnings && diag.warnings.length) ? diag.warnings.length + ' warning(s) from the boot: ' + diag.warnings.join(' | ') : '';
+	}
 	const summary = 'components=' + diag.paintObjectCount
 		+ ' capture=' + diag.captureMode
 		+ ' canvas=' + diag.canvasCount + '/charts=' + diag.chartComponents

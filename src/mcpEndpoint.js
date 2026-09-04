@@ -14,6 +14,8 @@
 const config = require('./config');
 const debug = require('./debug');
 const election = require('./electionRules');
+const fs = require('fs');
+const path = require('path');
 
 const PROTOCOL_VERSION = '2025-03-26';
 
@@ -1046,7 +1048,32 @@ class McpEndpoint {
 			// through the MockFlow endpoints with the user's own session, then draws the
 			// result - the bridge only relays the args (see boardHub.drawHtml).
 			const mcpType = name.replace('render_', '');
-			const hres = await this.hub.drawHtml(board, name, mcpType, args, withImages);
+			const hres = await this.hub.drawHtml(board, name, mcpType, args, withImages, entry.clientPreviewOnly ? { previewOnly: true } : null);
+			// preview_artifact draws nothing: the tab booted the document and answered with
+			// findings + screenshots. Screenshots land on disk (the agent can open image
+			// files; an MCP text result cannot carry them) and the findings go back verbatim.
+			if (entry.clientPreviewOnly || (hres && hres.preview)) {
+				const files = [];
+				try {
+					const dir = path.join(config.HOME_DIR, 'artifact-previews');
+					fs.mkdirSync(dir, { recursive: true });
+					(hres && hres.screenshots || []).forEach(function(sh, i) {
+						const f = path.join(dir, new Date().toISOString().replace(/[:.]/g, '-') + '-' + i + '.png');
+						fs.writeFileSync(f, Buffer.from(String(sh.png || ''), 'base64'));
+						files.push(f + '  (' + (sh.label || 'screenshot') + ', ' + sh.width + 'x' + sh.height + ')');
+					});
+					// keep the folder small
+					const all = fs.readdirSync(dir).filter(function(x) { return /\.png$/.test(x); }).sort();
+					while (all.length > 40) { try { fs.unlinkSync(path.join(dir, all.shift())); } catch (e) {} }
+				} catch (e) {}
+				const findings = (hres && hres.findings) || [];
+				const errors = findings.filter(function(x) { return /^\[error\]/.test(x); }).length;
+				return this._ok((errors ? 'PREVIEW FOUND ' + errors + ' PROBLEM' + (errors === 1 ? '' : 'S') + '. Fix every [error] and preview again before render_artifact.'
+					: 'PREVIEW CLEAN. Open the screenshots and judge them as a design lead would; if it looks finished, call render_artifact with this document.')
+					+ (findings.length ? '\n\nFindings:\n' + findings.join('\n') : '')
+					+ (files.length ? '\n\nScreenshots (open these files to see what members see):\n' + files.join('\n') : '')
+					+ ((hres && hres.state) ? '\n\nFinal shared state after the scripted session: ' + JSON.stringify(hres.state).slice(0, 1500) : ''));
+			}
 			// A wireframelite/prototypelite render always draws - count it for basic plans.
 			if (meter) this._recordGen(board);
 			// Conversion report from the tab (component/chart/icon counts + warnings). It

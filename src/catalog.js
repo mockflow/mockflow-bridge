@@ -45,11 +45,46 @@ function validateRegistry(registry) {
 		&& registry.length > 0;
 }
 
+// Where the catalog comes from on THIS start. Every start fetches fresh: the cache is
+// only ever an offline fallback. With no MFBRIDGE_CATALOG_URL set, a MockFlow node
+// server running on this machine (the dev setup) is detected and preferred over
+// production, so a developer never runs a session against yesterday's production
+// catalog by accident; everyone else lands on production as before. Detection is a
+// sub-second probe that must answer with a real catalog module, so a stranger on
+// port 3000 cannot hijack it.
+const LOCAL_PROBE_URL = 'http://localhost:3000/call/api/mcpcatalog/ideaboard';
+let effectiveUrl = null;
+async function resolveCatalogUrl() {
+	if (effectiveUrl) return effectiveUrl;
+	if (process.env.MFBRIDGE_CATALOG_URL) { effectiveUrl = config.CATALOG_URL; return effectiveUrl; }
+	try {
+		const controller = new AbortController();
+		const t = setTimeout(function() { controller.abort(); }, 900);
+		const resp = await fetch(LOCAL_PROBE_URL, { signal: controller.signal });
+		clearTimeout(t);
+		if (resp.ok) {
+			const text = await resp.text();
+			if (text.indexOf('module.exports') !== -1 && text.indexOf('mcpToolName') !== -1) {
+				effectiveUrl = LOCAL_PROBE_URL;
+				// Mirror what config would have derived had the URL been set explicitly.
+				config.CATALOG_URL = LOCAL_PROBE_URL;
+				config.LOCAL_CATALOG = true;
+				if (process.env.MFBRIDGE_DEBUG !== '0') config.DEBUG = true;
+				log('Catalog: LOCAL MockFlow server detected at ' + LOCAL_PROBE_URL + ' - using it instead of production (set MFBRIDGE_CATALOG_URL to override)');
+				return effectiveUrl;
+			}
+		}
+	} catch (e) { /* no local server: production */ }
+	effectiveUrl = config.CATALOG_URL;
+	return effectiveUrl;
+}
+
 async function fetchRemote() {
+	const url = await resolveCatalogUrl();
 	const controller = new AbortController();
 	const timer = setTimeout(function() { controller.abort(); }, config.CATALOG_FETCH_TIMEOUT_MS);
 	try {
-		const resp = await fetch(config.CATALOG_URL, { signal: controller.signal });
+		const resp = await fetch(url, { signal: controller.signal });
 		if (!resp.ok) throw new Error('HTTP ' + resp.status);
 		const text = await resp.text();
 		if (text.indexOf('module.exports') === -1) throw new Error('not a catalog module');
@@ -80,11 +115,14 @@ async function load() {
 	// "isn't in the catalog" and the reason is nowhere near the symptom. So wait the
 	// server out briefly before giving up. A remote catalog gets one attempt: it is
 	// either reachable or it is not, and startup should not hang on it.
+	await resolveCatalogUrl();
 	const attempts = config.LOCAL_CATALOG ? 6 : 1;
 	for (var i = 0; i < attempts; i++) {
 		try {
 			const registry = await fetchRemote();
-			log('Catalog: loaded' + (i > 0 ? ' (after waiting ' + (i * 5) + 's for ' + config.CATALOG_URL + ')' : ''));
+			// Always say WHERE this session's tools came from: a stale or wrong catalog is
+			// the first thing to rule out when a tool "is not there".
+			log('Catalog: loaded fresh from ' + config.CATALOG_URL + ' (' + registry.length + ' entries)' + (i > 0 ? ' after waiting ' + (i * 5) + 's' : ''));
 			warnIfEngineOld(registry);
 			return { registry: registry, source: 'remote' };
 		} catch (err) {

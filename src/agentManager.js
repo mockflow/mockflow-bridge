@@ -789,6 +789,17 @@ class AgentManager {
 		return null;
 	}
 
+	/**
+	 * Tools that travel WITH a render tool: render_artifact is authored by iteration, so
+	 * its preview tool (boot + findings + screenshots, draws nothing) rides along wherever
+	 * render_artifact is allowed. Catalog-driven by name, no other engine code.
+	 */
+	_withHelperTools(list) {
+		var out = list.slice();
+		if (out.indexOf('render_artifact') !== -1 && out.indexOf('preview_artifact') === -1) out.push('preview_artifact');
+		return out;
+	}
+
 	_allowedTools() {
 		var tools = ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'mcp__mockflow__*'];
 		if (process.env.MFBRIDGE_ALLOW_WRITE === '1') tools.push('Write', 'Edit', 'Bash');
@@ -1654,7 +1665,7 @@ class AgentManager {
 				+ 'Do not draw anything else, do not call any other tool, do not chat, do not output any text, '
 				+ 'and never output a URL or a link.';
 			allowed = tools.length
-				? tools.map(function(t) { return 'mcp__mockflow__' + t; }).join(',')
+				? this._withHelperTools(tools).map(function(t) { return 'mcp__mockflow__' + t; }).join(',')
 				: 'mcp__mockflow__*';
 		} else if (isConvert) {
 			systemPrompt = 'You convert a MockFlow component into the different component the user asked for. '
@@ -1677,11 +1688,13 @@ class AgentManager {
 				+ 'componentType or type argument, set it to exactly that so the right component is filled.';
 			if (tools.length === 1) {
 			var toolLabel = tools[0].replace(/^render_/, '');
+			var helpers = this._withHelperTools(tools).slice(1);
 			systemPrompt = 'You generate the data for a single MockFlow ' + toolLabel + ' component the user is editing '
 				+ 'in place. Call the ' + tools[0] + ' tool exactly once with complete, well-formed data for the request.'
 				+ typeHint + ' The result fills the component the user is editing - do not draw anything else, do not call '
-				+ 'any other tool, do not chat, do not output any text, and never output a URL or a link.';
-			allowed = 'mcp__mockflow__' + tools[0];
+				+ 'any other ' + (helpers.length ? 'render ' : '') + 'tool, do not chat, do not output any text, and never output a URL or a link.'
+				+ (helpers.length ? ' Before that one call you may use ' + helpers.join(', ') + ' as often as needed; it draws nothing.' : '');
+			allowed = this._withHelperTools(tools).map(function(t) { return 'mcp__mockflow__' + t; }).join(',');
 		} else {
 			systemPrompt = 'You generate the data for a single MockFlow component the user is editing in place. '
 				+ 'Choose the ONE tool from [' + tools.join(', ') + '] that best fits the request and call it exactly '
