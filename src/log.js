@@ -8,6 +8,15 @@
  */
 
 var sink = null;
+var fs = require('fs');
+var path = require('path');
+var os = require('os');
+// Every line is also appended to ~/.mockflow/bridge.log, so a turn can be traced
+// after the fact without the terminal that ran the daemon. Best effort only.
+var LOG_FILE = path.join(os.homedir(), '.mockflow', 'bridge.log');
+function toFile(line) {
+	try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
+}
 
 function ts() {
 	return new Date().toISOString().replace('T', ' ').replace(/\..+/, '');
@@ -15,6 +24,7 @@ function ts() {
 
 function log() {
 	var args = Array.prototype.slice.call(arguments);
+	toFile('[bridge ' + ts() + '] ' + args.join(' '));
 	if (sink) { try { return sink(args.join(' ')); } catch (e) {} }
 	console.error.apply(console, ['[bridge ' + ts() + ']'].concat(args));
 }

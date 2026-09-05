@@ -77,6 +77,9 @@ async function start(opts) {
 	// The user said yes to images on a component that was already rendered without
 	// them: a fresh turn renders it again with image slots (nothing waited).
 	hub.onImageRerender = function(tab, req, sendToTab) { agents.handleImageRerender(tab, req, hub, sendToTab); };
+	// A render shipped with a required follow-up after the calling turn had ended
+	// (the image question ended it): a fresh turn carries the follow-up out.
+	hub.onFollowUp = function(tab, req, sendToTab) { agents.handleFollowUp(tab, req, hub, sendToTab); };
 	// Decide-then-draw: the agent said what it will draw, then (once any question
 	// is answered) the drawing step of that same chat turn runs.
 	hub.onDeclared = function(projectid, tool, held) { agents.noteDeclared(projectid, tool, held); };

@@ -583,6 +583,10 @@ class BoardHub {
 	setCapture(projectid, turnId, send, opts) {
 		if (projectid) this.captures.set(projectid, {
 			turnId: turnId, send: send, html: !!(opts && opts.html),
+			// How many times this turn has filled its component. A fill that came back
+			// with a required follow-up keeps the capture armed for ONE more fill, so the
+			// agent's follow-up merge lands on the same tile instead of minting a new one.
+			filled: 0,
 			// The tab this turn belongs to. Its result goes back HERE, not merely to
 			// "a tab showing this board" - with the board open twice those differ, and
 			// the other tab has no turn waiting for it.
@@ -596,6 +600,13 @@ class BoardHub {
 
 	hasCapture(projectid) {
 		return !!(projectid && this.captures.has(projectid));
+	}
+
+	/** True when the armed capture has already filled its component at least once
+	 *  (it is armed for a follow-up, not still waiting for the first result). */
+	captureFilled(projectid) {
+		const cap = projectid ? this.captures.get(projectid) : null;
+		return !!(cap && cap.filled > 0);
 	}
 
 	/**
@@ -1115,6 +1126,21 @@ class BoardHub {
 				// Filled in place: nothing new landed on the board, so this is not a
 				// planned draw and must not advance a plan batch.
 				if (res && res.filled) {
+					// The capture stays armed for exactly one follow-up fill when the
+					// tab's conversion asked for one; otherwise, or once that follow-up has
+					// landed, it is done. A follow-up on the follow-up is never offered
+					// (it is stripped here), so the agent cannot be sent to a tile that is
+					// no longer armed - that path minted duplicate tiles.
+					const capNow = key ? self.captures.get(key) : null;
+					const followUp = !!(res.diagnostics && res.diagnostics.followUp);
+					if (capNow && cap && capNow.turnId === cap.turnId) {
+						capNow.filled = (capNow.filled || 0) + 1;
+						if (followUp && capNow.filled === 1) {
+							self.log('[followup] ' + toolName + ' filled the component with a required follow-up - the same tile stays armed for one more fill');
+							return res;
+						}
+					}
+					if (res.diagnostics && res.diagnostics.followUp) delete res.diagnostics.followUp;
 					self.clearCapture(key);
 					return res;
 				}
@@ -1504,6 +1530,32 @@ class BoardHub {
 		}
 		this.log('[images] re-rendering ' + req.toolName + ' with image slots on board ' + key);
 		this.onImageRerender(target.tab, req, sendToTab);
+	}
+
+	/**
+	 * A render shipped, and the server that stored it answered with a required
+	 * follow-up (its review found the result unfinished) - but the agent turn that
+	 * made the call is over. Start a fresh turn that carries the follow-up out, the
+	 * way requestImageRerender does for a yes to images.
+	 */
+	requestFollowUp(projectid, req) {
+		var target;
+		try { target = this._targetTab(projectid || null); }
+		catch (e) {
+			this.log('[followup] cannot run the follow-up: ' + (e && e.message));
+			return;
+		}
+		const key = target.tab.projectid || target.tab.id;
+		// The follow-up call must pass the image gate with the answer already given.
+		this.imageChoices.set(key, req.withImages === true);
+		const self = this;
+		const sendToTab = function(frame) { self._send(target.ws, frame); };
+		if (!this.onFollowUp) {
+			this.log('[followup] follow-up turns are not enabled on this bridge - the component stays as shipped');
+			return;
+		}
+		this.log('[followup] running the follow-up for ' + req.toolName + ' on board ' + key);
+		this.onFollowUp(target.tab, req, sendToTab);
 	}
 
 	// ---- requests ------------------------------------------------------------

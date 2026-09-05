@@ -88,6 +88,13 @@ const PERSONA =
  * Content grounding itself (never invent names/figures) is NOT stated here: it
  * lives in the catalog tool descriptions, so every agent gets it, not just this one.
  */
+// Appended to the "exactly once" framing of a component fill. A successful call
+// whose result asks for a REQUIRED FOLLOW-UP is the one case where a second call
+// belongs to the same turn; without saying so, agents read "exactly once" as
+// "stop after the first success" and the follow-up is never made.
+const FOLLOWUP_CLAUSE = ' One exception to "exactly once": when the tool\'s result contains a REQUIRED FOLLOW-UP,'
+	+ ' that one additional call is part of this turn - carry it out as stated, then stop.';
+
 const RESEARCH_GUIDANCE =
 	' If the request depends on real-world, current, or factual data (live statistics, '
 	+ 'prices, dates, real places, market figures), first use WebSearch/WebFetch to get '
@@ -1680,13 +1687,15 @@ class AgentManager {
 			systemPrompt = 'You generate the data for a single MockFlow ' + toolLabel + ' component the user is editing '
 				+ 'in place. Call the ' + tools[0] + ' tool exactly once with complete, well-formed data for the request.'
 				+ typeHint + ' The result fills the component the user is editing - do not draw anything else, do not call '
-				+ 'any other tool, do not chat, do not output any text, and never output a URL or a link.';
+				+ 'any other tool, do not chat, do not output any text, and never output a URL or a link.'
+				+ FOLLOWUP_CLAUSE;
 			allowed = 'mcp__mockflow__' + tools[0];
 		} else {
 			systemPrompt = 'You generate the data for a single MockFlow component the user is editing in place. '
 				+ 'Choose the ONE tool from [' + tools.join(', ') + '] that best fits the request and call it exactly '
 				+ 'once with complete, well-formed data.' + typeHint + ' The result fills the component the user is editing '
-				+ '- do not draw anything else, do not call any other tool, do not chat, do not output any text, and never output a URL or a link.';
+				+ '- do not draw anything else, do not call any other tool, do not chat, do not output any text, and never output a URL or a link.'
+				+ FOLLOWUP_CLAUSE;
 			allowed = tools.map(function(t) { return 'mcp__mockflow__' + t; }).join(',');
 			}
 		}
@@ -1883,7 +1892,10 @@ class AgentManager {
 			self.compgenProcs.delete(key);
 			// A still-armed capture (create/modify) means the agent never produced
 			// the data - drop it and let the client fall back to the server.
-			var stillArmed = hub.hasCapture(tab.projectid);
+			// (A capture kept armed for a follow-up has already filled the component:
+			// the agent produced it, whether or not the follow-up came.)
+			var stillArmed = hub.hasCapture(tab.projectid)
+				&& !(typeof hub.captureFilled === 'function' && hub.captureFilled(tab.projectid));
 			hub.clearCapture(tab.projectid);
 			if (tab.projectid) hub.convertContext.delete(tab.projectid);
 			hub.selectedProjectId = prevSelected;
@@ -2065,26 +2077,11 @@ class AgentManager {
 	 * Drives the same Mida loader the plan continuation drives.
 	 */
 	handleImageRerender(tab, req, hub, sendToTab) {
-		const self = this;
-		const key = tab.projectid || tab.id;
 		const tool = req && req.toolName;
 		const label = (req && req.label) || 'component';
-		const send = sendToTab || function() {};
 		if (!tool) return;
-
-		const fail = function(reason) {
-			self.log('[images] re-render skipped: ' + reason);
-			send({ t: 'plan-done', ok: false, error: reason });
-		};
-		if (!this.detect()) return fail(this.agent.label + ' is not installed, so the images could not be added.');
-		if (this.imageProcs.has(key)) return fail('That board is already adding images.');
-
 		var argsJson = '';
 		try { argsJson = JSON.stringify(req.args || {}); } catch (e) { argsJson = ''; }
-		if (!argsJson) return fail('The component data could not be read back.');
-
-		const prevSelected = hub.selectedProjectId;
-		if (tab.projectid) hub.selectedProjectId = tab.projectid;
 
 		const prompt = 'You rendered this ' + label + ' on the user\'s MockFlow board without imagery, and '
 			+ 'they have now asked for AI-generated images in it. Compose it AGAIN, this time with the '
@@ -2102,26 +2099,96 @@ class AgentManager {
 			+ 'pictures their own room: enlarge the canvas if you need to, and never shrink the type or '
 			+ 'squeeze a text box to fit one in. Call ' + tool + ' exactly once with the finished result. '
 			+ (req.guidance || '')
-			+ ' Each slot is a prompt token: put "mfimg::" followed by a plain description of the picture '
-			+ '(no text, letters or numbers in it) where the image asset belongs. The pictures are generated '
-			+ 'in the user\'s browser after your call, so never output a URL, never wait for one, do not chat '
-			+ 'and do not output any text. A call that comes back with an error drew nothing: read the error, '
+			// The slot form belongs to the TOOL: the catalog entry states its own
+			// (imageSlotInstruction) when it is not the mfimg:: token of component data.
+			+ ' ' + (req.slotInstruction
+				|| 'Each slot is a prompt token: put "mfimg::" followed by a plain description of the picture '
+				+ '(no text, letters or numbers in it) where the image asset belongs. The pictures are generated '
+				+ 'in the user\'s browser after your call, so never output a URL, never wait for one.')
+			+ ' Do not chat and do not output any text. A call that comes back with an error drew nothing: read the error, '
 			+ 'fix what it names, and call the tool again (up to three tries).';
 
+		this._runPinnedTurn(tab, hub, sendToTab, {
+			tool: tool, label: label, prompt: prompt, systemPrompt: systemPrompt, argsJson: argsJson,
+			tag: 'images', startLabel: 'Adding images…', doneText: 'Images added.',
+			logLine: 're-rendering ' + tool + ' with image slots',
+			nothingError: 'The local agent finished without re-rendering the component.',
+			stoppedError: 'The local agent stopped before adding the images',
+			cannotError: 'so the images could not be added.'
+		});
+	}
+
+	/**
+	 * A render shipped and the server that stored it answered with a REQUIRED
+	 * FOLLOW-UP (its own review found the result unfinished), but the turn that
+	 * made the call had already ended - at the image question. Run the follow-up on
+	 * a fresh turn pinned to that tool. Generic: the follow-up text and the findings
+	 * come from the tab's conversion report, whatever the tool.
+	 */
+	handleFollowUp(tab, req, hub, sendToTab) {
+		const tool = req && req.toolName;
+		const label = (req && req.label) || 'component';
+		if (!tool || !req.followUp) return;
+		var argsJson = '';
+		try { argsJson = JSON.stringify(req.args || {}); } catch (e) { argsJson = ''; }
+
+		const prompt = 'You rendered this ' + label + ' on the user\'s MockFlow board; it is stored and on their '
+			+ 'screen. MockFlow reviewed what shipped and requires a follow-up:\n\n' + req.followUp
+			+ (req.report ? '\n\nFindings from that review:\n' + req.report : '')
+			+ '\n\nThis is the call you made, as the record of what it is:\n' + argsJson;
+		const systemPrompt = 'You finish a ' + label + ' you already rendered. Carry out the required follow-up '
+			+ 'exactly as stated, with ONE call to ' + tool + ', then stop. Keep everything it is ABOUT and '
+			+ 'everything that works; change what the findings name. Do not chat and do not output any text. '
+			+ 'A call that comes back with an error changed nothing: read the error, fix what it names, and '
+			+ 'call the tool again (up to three tries).';
+
+		this._runPinnedTurn(tab, hub, sendToTab, {
+			tool: tool, label: label, prompt: prompt, systemPrompt: systemPrompt, argsJson: argsJson,
+			tag: 'followup', startLabel: 'Finishing…', doneText: 'Finished.',
+			logLine: 'running the follow-up for ' + tool,
+			nothingError: 'The local agent finished without applying the follow-up.',
+			stoppedError: 'The local agent stopped before finishing the component',
+			cannotError: 'so the follow-up could not be applied.'
+		});
+	}
+
+	/**
+	 * One headless turn pinned to a single render tool (the image re-render, the
+	 * follow-up): spawn the agent with the given prompts, drive the Mida loader with
+	 * plan-start/plan-done, and judge the turn by whether the tool was actually called.
+	 */
+	_runPinnedTurn(tab, hub, sendToTab, opts) {
+		const self = this;
+		const key = tab.projectid || tab.id;
+		const tool = opts.tool;
+		const send = sendToTab || function() {};
+		const tag = '[' + opts.tag + '] ';
+
+		const fail = function(reason) {
+			self.log(tag + 'turn skipped: ' + reason);
+			send({ t: 'plan-done', ok: false, error: reason });
+		};
+		if (!this.detect()) return fail(this.agent.label + ' is not installed, ' + opts.cannotError);
+		if (this.imageProcs.has(key)) return fail('That board is already running a follow-up turn.');
+		if (!opts.argsJson) return fail('The component data could not be read back.');
+
+		const prevSelected = hub.selectedProjectId;
+		if (tab.projectid) hub.selectedProjectId = tab.projectid;
+
 		const ws = this._effectiveWorkspace(tab);
-		const delivery = this._deliverPrompt(prompt, key);
+		const delivery = this._deliverPrompt(opts.prompt, key);
 		const spec = this.agent.buildArgs(this._applyDelivery({
 			cwd: ws,
 			projectid: tab.projectid,
 			prompt: delivery.prompt,
-			systemPrompt: systemPrompt,
+			systemPrompt: opts.systemPrompt,
 			allowedTools: 'mcp__mockflow__' + tool,
 			mockflowTools: this._mockflowToolNames(),
 			partialMessages: false
 		}, delivery));
 
-		this.log('[images] re-rendering ' + tool + ' with image slots for "' + (tab.title || key) + '"');
-		send({ t: 'plan-start', total: 1, label: 'Adding images…', items: [{ name: label, tool: tool }] });
+		this.log(tag + opts.logLine + ' for "' + (tab.title || key) + '"');
+		send({ t: 'plan-start', total: 1, label: opts.startLabel, items: [{ name: opts.label, tool: tool }] });
 
 		var proc;
 		try {
@@ -2150,17 +2217,17 @@ class AgentManager {
 			// This answer belonged to this piece of work, like every other turn.
 			hub.setImageChoice(tab.projectid, undefined);
 			self._noteTurnHealth(streamStats, mcpDelta(), true);
-			send({ t: 'plan-done', ok: ok, error: error || null, doneText: ok ? 'Images added.' : null });
+			send({ t: 'plan-done', ok: ok, error: error || null, doneText: ok ? opts.doneText : null });
 		};
 		proc.on('error', function(err) { done(false, 'Local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
-			// The re-render only exists as an MCP call: a clean exit that never
-			// reached the bridge added no images, whatever the exit code says.
+			// The turn only exists as an MCP call: a clean exit that never reached the
+			// bridge changed nothing, whatever the exit code says.
 			if (code === 0 && mcpDelta() === 0) {
-				return done(false, 'The local agent finished without re-rendering the component.');
+				return done(false, opts.nothingError);
 			}
 			if (code === 0) return done(true, null);
-			done(false, 'The local agent stopped before adding the images'
+			done(false, opts.stoppedError
 				+ (lastErrorLine(streamStats.stderrTail, 160) ? ' (' + lastErrorLine(streamStats.stderrTail, 160) + ')' : '') + '.');
 		});
 	}

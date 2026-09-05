@@ -1053,23 +1053,32 @@ class McpEndpoint {
 			// goes back to the AGENT too: a sparse or icon-less render is something the
 			// agent can fix by regenerating the HTML, but only if it is told.
 			const report = debug.toolResult(name, hres);
-			const suffix = report ? '\n\nConversion report: ' + report : '';
+			// A follow-up the tab's conversion asks the agent to carry out right away (the
+			// server reviewed what shipped and found it unfinished). Catalog/tab-driven:
+			// whatever text arrives is what the agent is told to do next.
+			const followUp = (hres && hres.diagnostics && typeof hres.diagnostics.followUp === 'string') ? hres.diagnostics.followUp.trim() : '';
+			const suffix = (report ? '\n\nConversion report: ' + report : '')
+				+ (followUp ? '\n\nREQUIRED FOLLOW-UP: ' + followUp : '');
 			// Filled the component the user is editing (a Generate/Modify turn on a
 			// component whose local tool is this HTML one) - say so, or the agent reads
 			// "rendered onto the board" as a new component and may draw again.
+			const withFollowUp = function(res) { res.followUp = followUp; res.report = report; return res; };
 			if (hres && hres.filled) {
-				return this._ok('Filled the ' + mcpType + ' component the user is editing with this design. '
-					+ 'It has replaced that component\'s content on their screen. You are done: do not call '
-					+ 'this or any other render tool again, and never output a URL or a link.' + suffix);
+				return withFollowUp(this._ok('Filled the ' + mcpType + ' component the user is editing with this design. '
+					+ 'It has replaced that component\'s content on their screen. '
+					+ (followUp
+						? 'Apply the required follow-up below with one more call to this same tool, then stop; never output a URL or a link.'
+						: 'You are done: do not call this or any other render tool again, and never output a URL or a link.')
+					+ suffix));
 			}
 			if (hres && hres.arranged) {
-				return this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
+				return withFollowUp(this._ok('Rendered the ' + mcpType + ' - that was the last planned item, so the board '
 					+ 'was arranged automatically under "' + hres.boardTitle + '". You are done: do not call '
-					+ 'layout_board or any other tool, and never output a URL or a link.' + suffix);
+					+ 'layout_board or any other tool, and never output a URL or a link.' + suffix));
 			}
-			return this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
+			return withFollowUp(this._ok('Rendered the ' + mcpType + ' onto the board the user has open. '
 				+ 'It is already visible on their screen - do not output or ask the user to open a link.'
-				+ FOLLOWUP_HINT + suffix);
+				+ (followUp ? '' : FOLLOWUP_HINT) + suffix));
 		}
 
 		// Shape check BEFORE anything is drawn. Agents sometimes invent argument
@@ -1216,6 +1225,7 @@ class McpEndpoint {
 	 *           exactly what it sent, plus this tool's slot instructions.
 	 */
 	_afterImageAnswer(board, pending, on) {
+		const self = this;
 		// Not an answer at all: the user cancelled the question (askImages resolves
 		// null for that). A no still draws a slots component without its pictures,
 		// which is exactly what they declined - so nothing happens here.
@@ -1232,6 +1242,7 @@ class McpEndpoint {
 			}
 			this.log('[images] generating the ' + pending.label + ' the user confirmed');
 			return this._draw(board, pending.entry, pending.toolName, pending.args, true)
+				.then(function(res) { self._followUpAfterDraw(board, pending, res, true); })
 				.catch(function() {});
 		}
 		if (on) {
@@ -1239,13 +1250,37 @@ class McpEndpoint {
 				toolName: pending.toolName,
 				args: pending.args,
 				label: pending.label,
-				guidance: pending.entry.imagesOnGuidance || ''
+				guidance: pending.entry.imagesOnGuidance || '',
+				// How THIS tool takes its pictures, when the catalog says so; the default
+				// is the mfimg:: token form of component data.
+				slotInstruction: pending.entry.imageSlotInstruction || ''
 			});
 			return;
 		}
 		this.log('[images] drawing the ' + pending.label + ' the agent already produced, without images');
 		return this._draw(board, pending.entry, pending.toolName, pending.args, false)
+			.then(function(res) { self._followUpAfterDraw(board, pending, res, false); })
 			.catch(function() {});
+	}
+
+	/**
+	 * A draw whose result no agent reads (the turn that made the call ended at the
+	 * image question) came back with a required follow-up: hand it to a fresh turn,
+	 * exactly as a yes to images does. Generic: the follow-up text is whatever the
+	 * tab's conversion reported, for any tool.
+	 */
+	_followUpAfterDraw(board, pending, res, withImages) {
+		if (!res || !res.followUp) return;
+		if (typeof this.hub.requestFollowUp !== 'function') return;
+		this.log('[followup] the ' + pending.label + ' shipped with a required follow-up - starting a turn for it');
+		this.hub.requestFollowUp(board, {
+			toolName: pending.toolName,
+			args: pending.args,
+			label: pending.label,
+			followUp: res.followUp,
+			report: res.report || '',
+			withImages: !!withImages
+		});
 	}
 
 	/**
