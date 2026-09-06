@@ -723,6 +723,27 @@ class AgentManager {
 	 *  mis-frames (an artifact is a runnable app, not a picture of a design)
 	 *  states its own correction in the catalog, and the engine appends
 	 *  whichever apply - no tool-specific code here. */
+	/** A tool whose data is a file bundle it can patch: "files" plus "merge" in its schema. */
+	_bundleTool(tool) {
+		const entry = this.registry ? this.registry.filter(function(e) { return e.mcpToolName === tool; })[0] : null;
+		const props = entry && entry.clientIsHtmlConversion && entry.mcpInputSchema && entry.mcpInputSchema.properties;
+		return !!(props && props.files && props.merge);
+	}
+
+	/** What a create turn is told about sending its bundle in parts. */
+	_stagedBundleNote(tool) {
+		return ' SEND THE BUNDLE IN PARTS, never in one call: your reply size is capped, and a whole app in one call '
+			+ 'is cut off before it lands. A part is one ' + tool + ' call with "merge": true carrying one or two COMPLETE '
+			+ 'files (about 8-12 KB of code per call at most) - the bridge stages it and nothing shows on the board yet. '
+			+ 'Send the parts in script order: shell.html with theme.css and copy.json first, then each app/*.js, a file '
+			+ 'before the files that use it. The LAST call ships: NO "merge", the remaining file(s), "order" listing every '
+			+ 'file of the bundle in script order (staged files included, pre-drawn files excluded), plus title, width, '
+			+ 'height and dataHint, and "assets" when pictures were agreed - it assembles everything staged and fills the '
+			+ 'component. For this tool "exactly once" means one shipping call; the part calls before it are expected. '
+			+ 'Keep the code lean: no comments, Tailwind utility classes instead of hand-written CSS wherever the injected '
+			+ 'Tailwind covers it, one responsibility per file.';
+	}
+
 	_toolFillContract(tools) {
 		if (!this.registry || !tools || !tools.length) return '';
 		const parts = [];
@@ -1644,11 +1665,15 @@ class AgentManager {
 		// in boardHub.drawHtml rather than captureOrDraw - the capture carries the flag
 		// so drawHtml knows this one is a fill and not an unrelated agent's draw.
 		const isFill = !isConvert && !isSimilar && !isGenerate;
+		// A bundle tool on a create turn is written in PARTS (each a "merge" call the
+		// endpoint stages) and shipped by one final call: the agent's reply size is
+		// capped, and a whole app in one call was cut off before it landed.
+		const stageTool = (isFill && mode === 'createai' && tools.length === 1 && this._bundleTool(tools[0])) ? tools[0] : null;
 		// tab.ws pins the result to the tab that started this turn: resolving by board
 		// alone picks the first tab showing it, which is a different tab when the user
 		// has the same board open twice - and that one has no turn waiting.
 		if (isFill) hub.setCapture(tab.projectid, turnId, sendToTab,
-			{ html: this._toolFillsFromHtml(tools), ws: tab.ws });
+			{ html: this._toolFillsFromHtml(tools), ws: tab.ws, stage: stageTool });
 		// Convert and prompt-box generations draw a NEW component; tag it with its
 		// source so the client connects and positions it relative to that source
 		// (parity with the server flow's fromconvert).
@@ -1734,6 +1759,7 @@ class AgentManager {
 		// a multi-tool generate turn reads as "use this tool" and skews the election
 		// (observed: "wireframe for a CRM app" drew one wireframelite instead of a plan).
 		if (tools && tools.length === 1) systemPrompt += this._toolFillContract(tools);
+		if (stageTool) systemPrompt += this._stagedBundleNote(stageTool);
 
 		// Real-world/current-data components: let the agent web-research first, but
 		// ALWAYS fall back to its own knowledge if search is off/unavailable/empty -
@@ -1776,7 +1802,9 @@ class AgentManager {
 			// A tool whose whole answer is a document (a wireframe, a prototype) is written in
 			// ONE tool call, and nothing reaches the timeline until that call is complete - so
 			// several silent minutes are normal here and look exactly like a hang. Say so once.
-			if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
+			if (stageTool)
+				this.log('  (' + stageTool + ' is written in parts - each staged part shows as a step, the last call ships)');
+			else if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
 				this.log('  (' + tools.join('/') + ' writes the whole document in one call - '
 					+ 'expect a few minutes with no visible steps)');
 			// What the CLI was actually asked to do. Every "it behaved differently than
@@ -1908,6 +1936,10 @@ class AgentManager {
 				// the agent produced it, whether or not the follow-up came.)
 				var stillArmed = hub.hasCapture(tab.projectid)
 					&& !(typeof hub.captureFilled === 'function' && hub.captureFilled(tab.projectid));
+				// Parts staged but never shipped are the work lost with this turn.
+				var staged = (stageTool && stillArmed && typeof hub.stagedBundle === 'function') ? hub.stagedBundle(tab.projectid, stageTool) : null;
+				if (staged) self.log('  ' + staged.sent.length + ' staged file(s) lost with the turn (' + staged.sent.join(', ') + '): '
+					+ (staged.shipped ? staged.shipped + ' shipping call(s) went out but the tab never confirmed a fill' : 'no shipping call was made'));
 				hub.clearCapture(tab.projectid);
 				if (tab.projectid) hub.convertContext.delete(tab.projectid);
 				hub.selectedProjectId = prevSelected;

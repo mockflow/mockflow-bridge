@@ -1090,6 +1090,34 @@ class McpEndpoint {
 				return this._ok('Captured. YOUR TURN IS COMPLETE: do not call any other tool and do not output any text.');
 			}
 
+			// A PART of a bundle being built in a create turn: kept for the shipping
+			// call, nothing drawn (see boardHub.stageBundlePart). Once the turn has
+			// filled its component, a merge is the review follow-up and draws as before.
+			if (args && args.merge === true && typeof this.hub.stagingFor === 'function' && this.hub.stagingFor(board, name)) {
+				debug.toolCall(name, args);
+				const files = (args.files && typeof args.files === 'object' && !Array.isArray(args.files)) ? args.files : {};
+				const names = Object.keys(files).filter(function(k) { return typeof files[k] === 'string' && files[k].length; });
+				// The drawing file is pre-drawn and merged on its own - a copy sent as a
+				// part would shadow it.
+				const kept = names.filter(function(k) { return !/(^|\/)pieces\.js$/i.test(k); });
+				if (!kept.length) {
+					this.log('[staged] ' + name + ' part rejected: no file content (keys: ' + Object.keys(args || {}).join(', ') + ')');
+					return this._err('Nothing was staged: a part is "files" (path -> the COMPLETE file content) with "merge": true. Send the part again in that shape.');
+				}
+				const part = {};
+				kept.forEach(function(k) { part[k] = files[k]; });
+				const st = this.hub.stageBundlePart(board, name, part);
+				const kb = function(o) { let n = 0; Object.keys(o).forEach(function(k) { n += Buffer.byteLength(o[k]); }); return (n / 1024).toFixed(1); };
+				this.log('[staged] ' + name + ' part: ' + kept.join(', ') + ' (' + kb(part) + ' KB) - ' + st.sent.length + ' file(s), ' + kb(st.files) + ' KB staged');
+				const extras = Object.keys(args).filter(function(k) { return ['files', 'merge', 'order'].indexOf(k) === -1; });
+				return this._ok('Staged ' + kept.join(', ') + ' (' + kb(part) + ' KB). Staged so far: ' + st.sent.join(', ')
+					+ ' (' + kb(st.files) + ' KB). Nothing is on the board yet.'
+					+ (extras.length ? ' Only the files were kept; ' + extras.join(', ') + ' belong(s) on the shipping call.' : '')
+					+ ' Continue with the next part ("merge": true), or ship: one final call WITHOUT "merge" carrying the remaining '
+					+ 'file(s), "order" listing every file of the bundle in script order, title, width, height and dataHint. '
+					+ 'The shipping call assembles everything staged and fills the component.');
+			}
+
 			// declare_render is only ONE of the ways a component gets elected: the
 			// drawing step can call a different tool than the one it declared, and an
 			// external MCP agent never declares at all. So the same rule applies here.
@@ -1122,7 +1150,12 @@ class McpEndpoint {
 
 			return await this._draw(board, entry, name, args, withImages);
 		} catch (err) {
-			return this._err('Error running ' + name + ': ' + (err && err.message));
+			// A failed shipping call loses nothing: the parts stay staged for the retry.
+			const staged = (typeof this.hub.stagingFor === 'function' && this.hub.stagingFor(board, name)
+				&& typeof this.hub.stagedBundle === 'function') ? this.hub.stagedBundle(board, name) : null;
+			return this._err('Error running ' + name + ': ' + (err && err.message)
+				+ (staged ? ' Every file sent so far is still staged (' + staged.sent.join(', ') + '): call ' + name
+					+ ' again WITHOUT "merge" to ship the whole bundle - resend only files you want to change.' : ''));
 		}
 	}
 
@@ -1152,8 +1185,36 @@ class McpEndpoint {
 			// A pre-pass captured files for this turn (the artifact's drawing pass): they
 			// ride in this call's bundle, first in script order, whatever the agent sent.
 			const pres = (typeof this.hub.getPrePasses === 'function') ? this.hub.getPrePasses(board) : [];
+			// The shipping call's own files, before anything captured is merged in.
+			const ownFiles = Object.keys((args && args.files && typeof args.files === 'object') ? args.files : {});
 			for (const pre of pres) {
 				if (!pre || !pre.args || !args || pre.args.none) continue;
+				if (pre.args.staged) {
+					// Only the shipping call takes the staged parts. Once the component is
+					// filled, a merge is the review follow-up and carries just what changed.
+					if (!(pre.args.files && !args.html && typeof this.hub.stagingFor === 'function' && this.hub.stagingFor(board, name))) continue;
+					// Parts staged by this turn: the shipping call's files win over a part,
+					// and its "order" is the script order - a staged file it leaves out goes
+					// where it was sent, ahead of the shipping call's own files.
+					args.files = Object.assign({}, pre.args.files, args.files || {});
+					const order = (Array.isArray(args.order) ? args.order : ownFiles).filter(function(f) { return args.files[f] !== undefined; });
+					const sent = Array.isArray(pre.args.sent) ? pre.args.sent : Object.keys(pre.args.files);
+					let at = -1;
+					ownFiles.forEach(function(f) { const i = order.indexOf(f); if (i !== -1 && (at === -1 || i < at)) at = i; });
+					if (at === -1) at = order.length;
+					sent.forEach(function(f) { if (order.indexOf(f) === -1 && args.files[f] !== undefined) order.splice(at++, 0, f); });
+					Object.keys(args.files).forEach(function(f) { if (order.indexOf(f) === -1) order.push(f); });
+					args.order = order;
+					// The shipping call's own files join the staged set: a call the tab fails
+					// to answer is retried with whatever the agent resends, and that retry must
+					// still carry the whole bundle.
+					const keep = {};
+					ownFiles.forEach(function(f) { if (typeof args.files[f] === 'string' && !/(^|\/)pieces\.js$/i.test(f)) keep[f] = args.files[f]; });
+					if (Object.keys(keep).length) this.hub.stageBundlePart(board, name, keep);
+					if (typeof this.hub.noteBundleShipped === 'function') this.hub.noteBundleShipped(board, name);
+					this.log('[staged] shipping call assembled ' + sent.length + ' staged file(s) with ' + ownFiles.join(', ') + ' - order: ' + order.join(', '));
+					continue;
+				}
 				if (pre.args.files && !args.html && Object.keys(pre.args.files).some(function(k) { return !/^none$/i.test(k); })) {
 					args.files = Object.assign({}, pre.args.files, args.files || {});
 					const preNames = Object.keys(pre.args.files);

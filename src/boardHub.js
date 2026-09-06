@@ -101,6 +101,11 @@ class BoardHub {
 		this.turnIntakes = new Map();
 		this.selectedProjectId = null;
 		this.nextId = 1;
+		// Request ids carry a per-run nonce: a tab that stays open across a bridge
+		// restart remembers the ids it has answered, and a bare counter that starts
+		// over at 1 made every reply to the new run's first requests look like a
+		// duplicate the tab could drop.
+		this.runNonce = Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
 		// MCP tool calls actually SERVED, counted at the endpoint's front door.
 		// This is the vendor-stable ground truth an agent turn's success is
 		// cross-checked against: the per-vendor stdout parsers can go blind when a
@@ -599,8 +604,53 @@ class BoardHub {
 			// The tab this turn belongs to. Its result goes back HERE, not merely to
 			// "a tab showing this board" - with the board open twice those differ, and
 			// the other tab has no turn waiting for it.
-			ws: (opts && opts.ws) || null
+			ws: (opts && opts.ws) || null,
+			// The bundle tool whose "merge" calls are STAGED until the shipping call
+			// (a create turn sends its bundle in parts, see stageBundlePart). Null when
+			// this turn's calls draw as they come.
+			stage: (opts && opts.stage) || null
 		});
+	}
+
+	/**
+	 * True while a call to `tool` on this board is a PART of a bundle being built:
+	 * the turn arms staging for that tool and has not shipped yet. Once the first
+	 * fill lands, a later merge is the review follow-up and draws as before.
+	 */
+	stagingFor(projectid, tool) {
+		const cap = projectid ? this.captures.get(projectid) : null;
+		return !!(cap && cap.stage && cap.stage === tool && !cap.filled);
+	}
+
+	/**
+	 * Keep one part of a bundle for the shipping call. Parts accumulate under
+	 * ONE pre-pass entry (later re-sends of a path replace the earlier one, and
+	 * the arrival order is kept for script order), which the endpoint merges into
+	 * the shipping call like any other captured files.
+	 */
+	stageBundlePart(projectid, tool, files) {
+		const key = tool + '#staged';
+		const cur = this.getPrePassFor(projectid, key);
+		const acc = Object.assign({}, cur && cur.args && cur.args.files);
+		const sent = (cur && cur.args && Array.isArray(cur.args.sent)) ? cur.args.sent.slice() : [];
+		Object.keys(files).forEach(function(name) {
+			acc[name] = files[name];
+			if (sent.indexOf(name) === -1) sent.push(name);
+		});
+		this.storePrePass(projectid, key, { files: acc, sent: sent, staged: true });
+		return { files: acc, sent: sent };
+	}
+
+	/** The parts staged for `tool` on this board, or null when none. */
+	stagedBundle(projectid, tool) {
+		const pre = this.getPrePassFor(projectid, tool + '#staged');
+		return (pre && pre.args && pre.args.files) ? pre.args : null;
+	}
+
+	/** A shipping call went out with the staged files: counted, so a lost turn can say so. */
+	noteBundleShipped(projectid, tool) {
+		const pre = this.getPrePassFor(projectid, tool + '#staged');
+		if (pre && pre.args) pre.args.shipped = (pre.args.shipped || 0) + 1;
 	}
 
 	clearCapture(projectid) {
@@ -1654,7 +1704,7 @@ class BoardHub {
 	_request(ws, frame, timeoutMs) {
 		const self = this;
 		return new Promise(function(resolve, reject) {
-			const id = 'req_' + (self.nextId++);
+			const id = 'req_' + self.runNonce + '_' + (self.nextId++);
 			frame.id = id;
 			const timer = setTimeout(function() {
 				self.pending.delete(id);

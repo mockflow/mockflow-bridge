@@ -1,11 +1,28 @@
 /**
  * Codex CLI adapter.
  *
- * Event envelope confirmed against `codex exec --json` on 0.145.0:
+ * Event envelope confirmed against `codex exec --json` on 0.145.0 and again
+ * on 0.153.4:
  *   {"type":"thread.started","thread_id":"019f89..."}
  *   {"type":"turn.started"}
  *   {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hi!"}}
  *   {"type":"turn.completed","usage":{...}}
+ *
+ * Code mode (0.153.x, feature `code_mode_host`, on by default): MCP tools are
+ * no longer called directly. The model gets one `exec` tool running a script,
+ * and every MCP tool is a function in it - `tools.mcp__mockflow__<name>(args)`
+ * - discoverable only by filtering an `ALL_TOOLS` array. Two consequences,
+ * both measured in a rollout (~/.codex/sessions) on 0.153.4:
+ *   - the calls still reach the bridge's MCP endpoint (which is what the
+ *     turn verdict counts), but NOTHING about them appears on the --json
+ *     stream: no item.started/item.completed of a tool type. Timeline rows
+ *     for codex come from the endpoint's own served-call steps, not from here.
+ *   - the model only sees the MockFlow tools it goes looking for. Left alone
+ *     it grepped ALL_TOOLS for declare_render, declared "none", never found
+ *     read_board / modify_component, and answered with an empty message. The
+ *     CODE_MODE_NOTE below, appended to every turn's instructions, tells it
+ *     where the board tools are. Turning code mode off is not an option:
+ *     `features.code_mode_host=false` makes MCP tools "fail closed".
  *
  * The whole per-turn setup rides `-c key=value` overrides, so the bridge never
  * writes to the user's ~/.codex/config.toml. Values are parsed as TOML and fall
@@ -18,6 +35,19 @@ const config = require('../config');
 const { spawnCli, spawnCliSync } = require('./spawnPortable');
 
 const BIN = 'codex';
+
+// Appended to every turn's developer_instructions (file header, "Code mode").
+// Harmless on a codex that calls MCP tools directly: it only speaks of the
+// script host when there is one.
+const CODE_MODE_NOTE = ' If your tools are reached through a script host (an exec tool with an'
+	+ ' ALL_TOOLS array), the MockFlow board tools are the entries whose name starts with'
+	+ ' "mcp__mockflow__", called as tools.mcp__mockflow__<name>(args). Before deciding'
+	+ ' what a request needs, list them all with'
+	+ ' ALL_TOOLS.filter(t => t.name.startsWith("mcp__mockflow__")) - reading, searching'
+	+ ' and editing the board are among them, not only declare_render - and use them the'
+	+ ' same way as if they were direct tools. A tool result is the value the call'
+	+ ' returns; print it with text(...) so you can read it. Always finish with a short'
+	+ ' reply to the user in plain text, never an empty message.';
 
 // Board-scoped when a projectid is given (/mcp/<token>/<projectid>): the daemon
 // routes this turn's draws to that board, so a concurrent turn on another tab
@@ -99,10 +129,10 @@ module.exports = {
 	// The CLI version the `-c` config keys and the event envelope below were
 	// confirmed against (see the file header). agents/health.js warns at startup
 	// when the installed codex is newer. Bump after re-running test/fake-*.js.
-	testedVersion: '0.145.0',
+	testedVersion: '0.153.4',
 
 	// Flags a turn depends on, checked against `codex exec --help` at startup
-	// (agents/health.js). Needles verified present in 0.145.0 - not guessed.
+	// (agents/health.js). Needles verified present in 0.145.0 and 0.153.4 - not guessed.
 	capabilityProbe: {
 		bin: BIN,
 		help: ['exec', '--help'],
@@ -229,7 +259,9 @@ module.exports = {
 		if (turn.systemPrompt) {
 			// Deliberately unquoted: a multi-line persona will not parse as TOML, and
 			// Codex then takes the raw string as a literal, which is what we want.
-			args.push('-c', 'developer_instructions=' + turn.systemPrompt);
+			args.push('-c', 'developer_instructions=' + turn.systemPrompt + CODE_MODE_NOTE);
+		} else {
+			args.push('-c', 'developer_instructions=' + CODE_MODE_NOTE.trim());
 		}
 		// turn.extraDirs is deliberately ignored (capabilities.extraDirs = false):
 		// read-only already permits reading them, and --add-dir is resume-hostile.
