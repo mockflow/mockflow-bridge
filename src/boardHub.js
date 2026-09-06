@@ -64,6 +64,15 @@ class BoardHub {
 		this.plans = new Map();     // projectid -> {boardTitle, remaining, expires} (plan_board batches)
 		this.pendingPicks = new Map(); // projectid -> {promise, decided, boardTitle, items} (plan selection)
 		this.imageChoices = new Map(); // projectid -> true|false (this turn's "generate images" answer)
+		// projectid -> { tool, args } captured by a capture-only tool during a pre-pass
+		// (the artifact's drawing pass); merged into the main turn's render call.
+		this.prePass = new Map();
+		// projectid -> tool name while a pre-pass turn is running: the only time a
+		// capture-only tool is offered or accepted.
+		this.prePassActive = new Map();
+		// projectid -> cid of the tile a follow-up turn must update in place (a tile drawn
+		// from chat has no fill capture; without this the follow-up would draw a twin).
+		this.followUpTargets = new Map();
 		this.imageAsks = new Map();    // projectid -> in-flight ask promise (one question per turn)
 		this.turnSurfaces = new Map(); // projectid -> 'mida' | a Concept Builder cid (where to ask)
 		this.turnModes = new Map();    // projectid -> 'create' | 'modify' (imagery rules differ)
@@ -602,6 +611,27 @@ class BoardHub {
 		return !!(projectid && this.captures.has(projectid));
 	}
 
+	clearFollowUpTarget(projectid) { if (projectid) this.followUpTargets.delete(projectid); }
+	/** A tile just drawn with a required follow-up: the NEXT render call on this board
+	 *  updates it in place (the agent's own turn is still running). Cleared when
+	 *  consumed and at the end of the turn, so it can never catch a later draw. */
+	setFollowUpTarget(projectid, cid) { if (projectid && cid) this.followUpTargets.set(projectid, String(cid)); }
+
+	// ---- pre-pass (capture-only tools) ----------------------------------------
+	// Several passes may run before one main turn (the plan, then the drawing): each
+	// capture is kept by its tool until the turn ends.
+	startPrePass(projectid, tool) { if (projectid) { this.prePassActive.set(projectid, tool); const m = this.prePass.get(projectid); if (m) m.delete(tool); } }
+	endPrePass(projectid) { if (projectid) this.prePassActive.delete(projectid); }
+	prePassToolFor(projectid) { return (projectid && this.prePassActive.get(projectid)) || null; }
+	storePrePass(projectid, tool, args) { if (!projectid) return; if (!this.prePass.has(projectid)) this.prePass.set(projectid, new Map()); this.prePass.get(projectid).set(tool, { tool: tool, args: args || {} }); }
+	/** The capture of one tool, or null. */
+	getPrePassFor(projectid, tool) { const m = projectid && this.prePass.get(projectid); return (m && m.get(tool)) || null; }
+	/** Every capture of this board's turn, in capture order. */
+	getPrePasses(projectid) { const m = projectid && this.prePass.get(projectid); return m ? Array.from(m.values()) : []; }
+	/** Kept for older callers: the last capture. */
+	getPrePass(projectid) { const all = this.getPrePasses(projectid); return all.length ? all[all.length - 1] : null; }
+	clearPrePass(projectid) { if (projectid) { this.prePass.delete(projectid); this.prePassActive.delete(projectid); } }
+
 	/** True when the armed capture has already filled its component at least once
 	 *  (it is armed for a follow-up, not still waiting for the first result). */
 	captureFilled(projectid) {
@@ -1106,8 +1136,11 @@ class BoardHub {
 		const frame = { t: 'toolhtml', toolName: toolName, mcpType: mcpType, args: args || {}, imagesAllowed: !!imagesAllowed };
 		// A fill replaces a component that is already placed, so it has no place in
 		// a plan's arrangement (and must not take an item's slot in it).
-		const planIndex = fill ? undefined : this._claimPlanOrder(key, toolName);
-		if (!fill) frame.planIndex = planIndex;
+		// A follow-up on a chat-drawn tile: the tab updates that tile instead of drawing.
+		const targetCid = (!fill && key) ? (this.followUpTargets.get(key) || null) : null;
+		const planIndex = (fill || targetCid) ? undefined : this._claimPlanOrder(key, toolName);
+		if (!fill && !targetCid) frame.planIndex = planIndex;
+		if (targetCid) frame.targetCid = targetCid;
 		if (fill) frame.fillTurnId = cap.turnId;
 		else if (cap) {
 			// A capture is armed but this tool is not one that fills from HTML, so this
@@ -1125,6 +1158,13 @@ class BoardHub {
 			.then(function(res) {
 				// Filled in place: nothing new landed on the board, so this is not a
 				// planned draw and must not advance a plan batch.
+				if (res && res.updated) {
+					// Updated in place: not a new tile, so no plan bookkeeping, and the target
+					// is spent (a follow-up on the follow-up is never offered).
+					self.followUpTargets.delete(key);
+					if (res.diagnostics && res.diagnostics.followUp) delete res.diagnostics.followUp;
+					return res;
+				}
 				if (res && res.filled) {
 					// The capture stays armed for exactly one follow-up fill when the
 					// tab's conversion asked for one; otherwise, or once that follow-up has
@@ -1548,6 +1588,8 @@ class BoardHub {
 		const key = target.tab.projectid || target.tab.id;
 		// The follow-up call must pass the image gate with the answer already given.
 		this.imageChoices.set(key, req.withImages === true);
+		if (req.targetCid) this.followUpTargets.set(key, String(req.targetCid));
+		else this.followUpTargets.delete(key);
 		const self = this;
 		const sendToTab = function(frame) { self._send(target.ws, frame); };
 		if (!this.onFollowUp) {

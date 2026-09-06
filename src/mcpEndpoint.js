@@ -276,6 +276,45 @@ const BRIDGE_TOOLS = [
 	}
 ];
 
+// A capture-only tool's arguments as agents actually send them: a plan nested under
+// "plan"/"artifact", the opt-out as files:{none:true} or none:"true", a lone drawing
+// file under any name. Normalized to the documented shape before anything is kept.
+function normalizeCaptureArgs(args) {
+	if (!args || typeof args !== 'object') return args;
+	let a = Object.assign({}, args);
+	const hasRealFiles = function(o) { return !!(o && o.files && typeof o.files === 'object' && Object.keys(o.files).some(function(k) { return !/^none$/i.test(k); })); };
+	const FEATURE_KEYS = ['features', 'capabilities', 'requirements', 'interactions', 'functionality', 'functions', 'user_stories'];
+	const STEP_KEYS = ['steps', 'acceptance', 'acceptance_steps', 'acceptanceSteps', 'tests', 'test_steps', 'walkthrough', 'scenario'];
+	const planLike = function(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && (FEATURE_KEYS.some(function(k) { return Array.isArray(o[k]); }) || STEP_KEYS.some(function(k) { return Array.isArray(o[k]); }) || hasRealFiles(o)); };
+	// A plan nested under any key (plan, artifact, spec...) is lifted to the top level.
+	if (!planLike(a)) {
+		for (const k of Object.keys(a)) {
+			if (planLike(a[k])) { a = Object.assign({}, a, a[k]); delete a[k]; break; }
+		}
+	}
+	// Field synonyms agents reach for.
+	if (!Array.isArray(a.features)) { for (const k of FEATURE_KEYS) { if (Array.isArray(a[k]) && a[k].length) { a.features = a[k]; break; } } }
+	if (!Array.isArray(a.steps)) { for (const k of STEP_KEYS) { if (Array.isArray(a[k])) { a.steps = a[k]; break; } } }
+	if (Array.isArray(a.features)) a.features = a.features.map(function(f) { return (f && typeof f === 'object') ? String(f.name || f.title || f.feature || f.description || f.text || '') : String(f || ''); }).filter(Boolean);
+	if (a.none === 'true' || a.none === 1) a.none = true;
+	if (a.files && typeof a.files === 'object') {
+		const keys = Object.keys(a.files);
+		if (keys.length && keys.every(function(k) { return /^none$/i.test(k); })) { delete a.files; if (!Array.isArray(a.features)) a.none = true; }
+	}
+	if (a.files && typeof a.files === 'object' && !Object.keys(a.files).length) delete a.files;
+	return a;
+}
+
+// Fixed ids on SVG defs in generated markup (the server's lintBundle rule for the
+// drawing file): an id whose quote closes right after literal text.
+function fixedSvgIds(code) {
+	const re = /<(linearGradient|radialGradient|filter|pattern|mask|clipPath|symbol)\b[^>]*\bid\s*=\s*(["'])([^"'+$`{\\]*?)\2/gi;
+	const seen = {}, out = [];
+	let m;
+	while ((m = re.exec(String(code || ''))) !== null) { if (m[3] && !seen[m[3]]) { seen[m[3]] = 1; out.push(m[3]); } }
+	return out;
+}
+
 class McpEndpoint {
 	/**
 	 * @param {object} opts
@@ -490,8 +529,14 @@ class McpEndpoint {
 		// can carry out (an in-place edit of a component the user has open). This IS that
 		// tab's agent, so they belong in its list; an older catalog simply ignores the flag.
 		const blocked = this._isFileModeTurn(board) ? this._fileModeBlockedTools() : null;
+		// A capture-only tool (a pre-pass such as the artifact's drawing pass) exists
+		// only while that pass runs on this board; at any other time it is not offered.
+		const prePassTool = (typeof this.hub.prePassToolFor === 'function') ? this.hub.prePassToolFor(board) : null;
 		return this.registry.getToolDefinitions({ bridge: true }).filter(function(def) {
-			return !(blocked && blocked[def.name]);
+			if (blocked && blocked[def.name]) return false;
+			const e = self._entry(def.name);
+			if (e && e.captureOnly) return prePassTool === def.name;
+			return true;
 		}).map(function(def) {
 			const entry = self._entry(def.name);
 			if (!entry || !entry.imageSlots) return def;
@@ -516,7 +561,7 @@ class McpEndpoint {
 
 	async _toolsCall(params, ctx) {
 		const name = params.name;
-		const args = params.arguments || {};
+		let args = params.arguments || {};
 		if (!name) throw new Error('Tool name is required');
 
 		// The board this connection is bound to (see handle()). Used as the target
@@ -982,6 +1027,69 @@ class McpEndpoint {
 			const entry = this._entry(name);
 			if (!entry) return this._err('Unknown tool: ' + name);
 
+			// Capture-only: the bridge keeps the arguments for the turn that follows and
+			// draws nothing. Accepted only while its pre-pass is running on this board.
+			if (entry.captureOnly) {
+				const active = (typeof this.hub.prePassToolFor === 'function') ? this.hub.prePassToolFor(board) : null;
+				if (active !== name) { this.log('[prepass] ' + name + ' called outside its pass (active: ' + (active || 'none') + ') - rejected'); return this._err(name + ' is not available in this turn. Nothing was captured.'); }
+				// Every capture call is dumped and logged, accepted or not: a rejected call
+				// leaves no other trace, and the shapes agents invent are the evidence.
+				debug.toolCall(name, args);
+				this.log('[prepass] ' + name + ' called with keys: ' + Object.keys(args || {}).join(', '));
+				args = normalizeCaptureArgs(args);
+				if (args && args.none === true) {
+					this.hub.storePrePass(board, name, { none: true });
+					this.log('[prepass] ' + name + ': nothing to draw for this app');
+					return this._ok('Noted: nothing to draw. YOUR TURN IS COMPLETE: do not call any other tool and do not output any text.');
+				}
+				const filesOk = args && args.files && typeof args.files === 'object' && Object.keys(args.files).length;
+				// A capture without files is a PLAN (features + steps): kept as sent.
+				if (!filesOk && args && Array.isArray(args.features) && args.features.length) {
+					debug.toolCall(name, args);
+					// Steps must be step objects the server can execute; sentences are dropped
+					// (the features still steer the build) and the agent is told the shape.
+					// Only EXECUTABLE steps count (one of the step shapes); prose, numbered
+					// items and {order,title,details} objects are not steps. The features are
+					// kept either way, and a plan without executable steps is sent back once
+					// with the shapes, since the steps are what the server verifies.
+					const isStep = function(x) { return !!x && typeof x === 'object' && ['click', 'dblclick', 'type', 'press', 'wait', 'expect'].filter(function(k) { return x[k] !== undefined; }).length === 1; };
+					const all = Array.isArray(args.steps) ? args.steps : [];
+					const good = all.filter(isStep);
+					args.steps = good;
+					this.hub.storePrePass(board, name, args);
+					if (!good.length) {
+						this.log('[prepass] ' + name + ' captured ' + args.features.length + ' features but no executable steps (' + all.length + ' sent) - asked again');
+						return this._err('The features were kept, but "steps" had no executable step: each step is ONE object of exactly one shape — {"click":"<visible control text>"}, {"dblclick":"<visible text>"}, {"type":"<text>","in":"<input placeholder>"}, {"press":"Enter","in":"<input placeholder>"}, {"wait":600}, {"expect":{"text":"..."}}, {"expect":{"notText":"..."}}, {"expect":{"visible":"..."}}, {"expect":{"state":{"tasks.length":1}}}, {"expect":{"count":{"of":"[data-key]","min":1}}} — never a sentence, never {order,title,details}. Call plan_artifact again with the same plan and 6-25 such steps covering every feature.');
+					}
+					const dropped = all.length - good.length;
+					this.log('[prepass] ' + name + ' captured a plan: ' + args.features.length + ' features, ' + good.length + ' steps' + (dropped ? ' (' + dropped + ' non-step entries dropped)' : ''));
+					return this._ok('Captured.' + (dropped ? ' ' + dropped + ' entries were not step objects and were dropped.' : '') + ' YOUR TURN IS COMPLETE: do not call any other tool and do not output any text.');
+				}
+				if (!filesOk) {
+					this.log('[prepass] ' + name + ' rejected: no files, no features (keys after normalizing: ' + Object.keys(args || {}).join(', ') + ')');
+					const shape = (entry.clientPrePassPrompt ? ' ' + String(entry.clientPrePassPrompt) : ' It takes "files" with the complete file content (or {"none": true}), or a plan with top-level "features" and "steps".');
+					return this._err('Nothing was captured: ' + name + ' does not take ' + Object.keys(args || {}).join(', ') + '.' + shape + ' Call it again in that shape.');
+				}
+				// The drawing file lives at app/pieces.js whatever the agent called it.
+				const keys = Object.keys(args.files);
+				if (keys.length === 1 && keys[0] !== 'app/pieces.js' && /pieces\.js$/i.test(keys[0])) {
+					args.files = { 'app/pieces.js': args.files[keys[0]] };
+				}
+				// The server rejects a drawing file with a fixed SVG id (every instance shares
+				// the first gradient), and the main turn may not touch this file - so the
+				// illustrator hears it NOW, in the pass that can fix it (same rule as
+				// artifactBundle.lintBundle).
+				const fixedIds = fixedSvgIds(args.files['app/pieces.js'] || '');
+				if (fixedIds.length) {
+					this.log('[prepass] ' + name + ' rejected: fixed SVG ids ' + fixedIds.join(', '));
+					return this._err('Nothing was captured: app/pieces.js gives a fixed id to ' + fixedIds.map(function(x) { return '"' + x + '"'; }).join(', ') + ' on a gradient, filter, pattern, mask or clipPath. Every instance a function returns lands in the same document, so an id must be unique PER CALL: build it from a per-call counter (e.g. var n = 0; ... var id = "disc-" + (++n);) and use that id in every url(#...) that references it. Fix that and call draw_pieces again with the complete file.');
+				}
+				debug.toolCall(name, args);
+				this.hub.storePrePass(board, name, args);
+				this.log('[prepass] ' + name + ' captured ' + Object.keys(args.files).join(', '));
+				return this._ok('Captured. YOUR TURN IS COMPLETE: do not call any other tool and do not output any text.');
+			}
+
 			// declare_render is only ONE of the ways a component gets elected: the
 			// drawing step can call a different tool than the one it declared, and an
 			// external MCP agent never declares at all. So the same rule applies here.
@@ -1041,6 +1149,29 @@ class McpEndpoint {
 		debug.toolCall(name, args);
 
 		if (entry.clientIsHtmlConversion) {
+			// A pre-pass captured files for this turn (the artifact's drawing pass): they
+			// ride in this call's bundle, first in script order, whatever the agent sent.
+			const pres = (typeof this.hub.getPrePasses === 'function') ? this.hub.getPrePasses(board) : [];
+			for (const pre of pres) {
+				if (!pre || !pre.args || !args || pre.args.none) continue;
+				if (pre.args.files && !args.html && Object.keys(pre.args.files).some(function(k) { return !/^none$/i.test(k); })) {
+					args.files = Object.assign({}, pre.args.files, args.files || {});
+					const preNames = Object.keys(pre.args.files);
+					args.order = preNames.concat((Array.isArray(args.order) ? args.order : Object.keys(args.files)).filter(function(p) { return preNames.indexOf(p) === -1; }));
+					this.log('[prepass] merged ' + preNames.join(', ') + ' into the ' + name + ' call');
+				} else if (Array.isArray(pre.args.features)) {
+					// The plan rides as spec (stored with the bundle) and its steps run at upload.
+					const plan = Object.assign({}, pre.args);
+					if (!args.spec) { try { args.spec = JSON.stringify(plan); } catch (e) {} }
+					// The plan's executable steps win over steps the agent typed as sentences.
+					const agentSteps = Array.isArray(args.steps) && args.steps.length && args.steps.every(function(x) { return x && typeof x === 'object'; });
+					if (!agentSteps && Array.isArray(plan.steps) && plan.steps.length) args.steps = plan.steps;
+					if (!args.title && plan.title) args.title = plan.title;
+					if (!args.width && plan.size && plan.size.width) { args.width = plan.size.width; args.height = plan.size.height; }
+					if (!args.dataHint && plan.dataHint) args.dataHint = plan.dataHint;
+					this.log('[prepass] merged the plan (' + plan.features.length + ' features, ' + (Array.isArray(plan.steps) ? plan.steps.length : 0) + ' steps) into the ' + name + ' call');
+				}
+			}
 			// render_wireframelite / render_prototypelite ship raw HTML. The CONNECTED TAB
 			// runs the conversion (HTML -> paintObjects render, or the prototype S3 upload)
 			// through the MockFlow endpoints with the user's own session, then draws the
@@ -1062,7 +1193,24 @@ class McpEndpoint {
 			// Filled the component the user is editing (a Generate/Modify turn on a
 			// component whose local tool is this HTML one) - say so, or the agent reads
 			// "rendered onto the board" as a new component and may draw again.
-			const withFollowUp = function(res) { res.followUp = followUp; res.report = report; return res; };
+			const withFollowUp = function(res) {
+				res.followUp = followUp; res.report = report;
+				// The tile this call produced, when the tab says: a follow-up turn targets it.
+				res.targetCid = (hres && hres.diagnostics && hres.diagnostics.artifactCid) || null;
+				return res;
+			};
+			// A new tile that needs a follow-up while this agent turn is still running:
+			// its next render call updates that tile instead of drawing a twin (a fill is
+			// already routed by its capture).
+			if (followUp && hres && !hres.filled && !hres.updated && hres.diagnostics && hres.diagnostics.artifactCid
+				&& typeof this.hub.setFollowUpTarget === 'function') {
+				this.hub.setFollowUpTarget(board, hres.diagnostics.artifactCid);
+			}
+			if (hres && hres.updated) {
+				return withFollowUp(this._ok('Updated the ' + mcpType + ' the user already has, in place. It is already '
+					+ 'changed on their screen. You are done: do not call this or any other render tool again, and never '
+					+ 'output a URL or a link.' + suffix));
+			}
 			if (hres && hres.filled) {
 				return withFollowUp(this._ok('Filled the ' + mcpType + ' component the user is editing with this design. '
 					+ 'It has replaced that component\'s content on their screen. '
@@ -1279,6 +1427,7 @@ class McpEndpoint {
 			label: pending.label,
 			followUp: res.followUp,
 			report: res.report || '',
+			targetCid: res.targetCid || null,
 			withImages: !!withImages
 		});
 	}
@@ -1381,6 +1530,7 @@ class McpEndpoint {
 }
 
 module.exports = McpEndpoint;
+module.exports.normalizeCaptureArgs = normalizeCaptureArgs;
 // The tools the BRIDGE adds on top of the catalog's render tools. Exported
 // because a per-turn allowlist has to cover exactly what tools/list serves:
 // leaving modify_component and read_board out of it means the agent cannot edit

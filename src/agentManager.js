@@ -1444,6 +1444,7 @@ class AgentManager {
 			// rather than inheriting permission to spend credits. The two steps of
 			// one decide-then-draw turn are NOT two turns, so the handover keeps it.
 			if (!handingOver) hub.setImageChoice(tab.projectid, undefined);
+			if (typeof hub.clearFollowUpTarget === 'function') hub.clearFollowUpTarget(tab.projectid);
 			// Same lifetime for the user's words: they belong to this turn, and the two
 			// steps of a decide-then-draw turn are one turn. Left behind, they would be
 			// judged against a later turn that has words of its own - or none.
@@ -1743,202 +1744,237 @@ class AgentManager {
 				+ ' Always finish by calling the render tool with complete data.';
 		}
 
-		const ws = this._effectiveWorkspace(tab);
-		const delivery = this._deliverPrompt(prompt, key);
-		const spec = this.agent.buildArgs(this._applyDelivery({
-			cwd: ws,
-			projectid: tab.projectid,
-			prompt: delivery.prompt,
-			systemPrompt: systemPrompt,
-			allowedTools: allowed,
-			mockflowTools: this._mockflowToolNames(),
-			// Announce the render tool the moment the model STARTS writing it, instead of
-			// when the whole call is written. For a tool whose argument is a document that
-			// is minutes of silence, and the last thing on screen stays whatever ran before
-			// it - so the turn looks stuck on that. (The plan turn uses it for this reason.)
-			partialMessages: true
-		}, delivery));
-
-		this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
-			+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + ws);
-		// A tool whose whole answer is a document (a wireframe, a prototype) is written in
-		// ONE tool call, and nothing reaches the timeline until that call is complete - so
-		// several silent minutes are normal here and look exactly like a hang. Say so once.
-		if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
-			this.log('  (' + tools.join('/') + ' writes the whole document in one call - '
-				+ 'expect a few minutes with no visible steps)');
-		// What the CLI was actually asked to do. Every "it behaved differently than
-		// when I ran it by hand" bug so far came down to a flag the turn did or did
-		// not carry, and there is no other way to see the spawned command line.
-		if (config.DEBUG) this.log('[debug] ' + this.agent.id + ' argv: ' + JSON.stringify(spec.args));
-
-		var proc;
-		try {
-			proc = this._spawnWithPrompt(spec, delivery, {
-				env: this._turnEnv(spec),
-				cwd: ws
+		// DRAWING PASS (catalog clientPrePass on the pinned tool): a short turn whose only
+		// job is the drawing file runs first; the endpoint merges its file into the main
+		// turn's render call. From the user's seat it is one generation.
+		const prePassEntries = (isFill && tools.length === 1) ? this._prePassFor(tools[0], mode) : [];
+		const launch = (pres) => {
+			(pres || []).forEach((pre) => {
+				if (!pre || !pre.args) return;
+				if (pre.args.files) systemPrompt += this._prePassNote(pre);
+				else if (Array.isArray(pre.args.features)) systemPrompt += this._planNote(pre);
 			});
-		} catch (err) {
-			hub.clearCapture(tab.projectid);
-			hub.selectedProjectId = prevSelected;
-			return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'Could not launch the local agent: ' + err.message });
-		}
-		this.compgenProcs.set(key, proc);
 
-		// This turn's MCP ground truth (see handleChat): a clean exit with zero
-		// served calls drew nothing, however healthy the exit code looks.
-		const mcpDelta = this._mcpCounter(hub, tab.projectid);
+			const ws = this._effectiveWorkspace(tab);
+			const delivery = this._deliverPrompt(prompt, key);
+			const spec = this.agent.buildArgs(this._applyDelivery({
+				cwd: ws,
+				projectid: tab.projectid,
+				prompt: delivery.prompt,
+				systemPrompt: systemPrompt,
+				allowedTools: allowed,
+				mockflowTools: this._mockflowToolNames(),
+				// Announce the render tool the moment the model STARTS writing it, instead of
+				// when the whole call is written. For a tool whose argument is a document that
+				// is minutes of silence, and the last thing on screen stays whatever ran before
+				// it - so the turn looks stuck on that. (The plan turn uses it for this reason.)
+				partialMessages: true
+			}, delivery));
 
-		var openSteps = {};
-		var stepCounter = 0;
-		var toolCalled = false;
-		// File-delivered prompts (Windows large-prompt path): the agent's first tool call
-		// is the read that fetches the prompt, not component data. Skip it so it neither
-		// opens a stray timeline row nor trips toolCalled and suppresses the fallback.
-		var deliveryTool = (delivery.file && delivery.file.tool) || null;
-		var skipIds = {};
-		var pendingDeliveryRead = !!deliveryTool;
+			this.log('Component AI turn (' + mode + ') for "' + (tab.title || key) + '"'
+				+ (tools.length ? ' via ' + tools.join('/') : '') + ', workspace: ' + ws);
+			// A tool whose whole answer is a document (a wireframe, a prototype) is written in
+			// ONE tool call, and nothing reaches the timeline until that call is complete - so
+			// several silent minutes are normal here and look exactly like a hang. Say so once.
+			if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
+				this.log('  (' + tools.join('/') + ' writes the whole document in one call - '
+					+ 'expect a few minutes with no visible steps)');
+			// What the CLI was actually asked to do. Every "it behaved differently than
+			// when I ran it by hand" bug so far came down to a flag the turn did or did
+			// not carry, and there is no other way to see the spawned command line.
+			if (config.DEBUG) this.log('[debug] ' + this.agent.id + ' argv: ' + JSON.stringify(spec.args));
 
-		// ---- liveness in the Activity log ------------------------------------------
-		// Writing a document-sized tool argument takes minutes during which the agent
-		// produces no EVENTS, only stream deltas - so the feed's last line stays whatever
-		// ran before it and the turn reads as hung. This says, every 30s, that it is alive,
-		// what it is doing, and how much has come back, which is the difference between
-		// "still writing, 34KB so far" and a genuinely stuck process.
-		var turnStart = Date.now();
-		var streamBytes = 0;
-		var lastOutputAt = Date.now();
-		var doing = 'thinking';
-		var lastStepLabel = '';
-		var ticker = setInterval(function() {
-			var secs = Math.round((Date.now() - turnStart) / 1000);
-			var quiet = Math.round((Date.now() - lastOutputAt) / 1000);
-			self.log('  … ' + doing + ' (' + (secs >= 60 ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's' : secs + 's')
-				+ (streamBytes ? ', ' + Math.round(streamBytes / 1024) + 'KB received' : '')
-				+ (quiet >= 60 ? ', nothing for ' + Math.round(quiet / 60) + 'm' : '') + ')');
-			// Same liveness signal to the TAB: the tool's start step is minutes old by
-			// now, so refresh the component's loading-overlay label with the received
-			// byte count. Only once a tool is in flight or bytes stream — the initial
-			// "thinking" stretch keeps the overlay's own opening caption. Old editors
-			// route this into a no-op onStep handler, so it degrades harmlessly.
-			if (lastStepLabel || streamBytes) {
-				var tabLabel = (lastStepLabel || 'Working') + (streamBytes ? ' — ' + Math.round(streamBytes / 1024) + ' kB' : '');
-				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: 'cg_live_' + turnId, phase: 'start', tool: 'liveness', label: tabLabel } });
+			var proc;
+			try {
+				proc = this._spawnWithPrompt(spec, delivery, {
+					env: this._turnEnv(spec),
+					cwd: ws
+				});
+			} catch (err) {
+				hub.clearCapture(tab.projectid);
+				hub.selectedProjectId = prevSelected;
+				return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'Could not launch the local agent: ' + err.message });
 			}
-		}, 30000);
-		if (ticker.unref) ticker.unref();
+			this.compgenProcs.set(key, proc);
 
-		function handleEvent(ev) {
-			if (ev.type === 'model') {
-				self._noteModel(ev.id, hub);
-			} else if (ev.type === 'tool-start') {
-				if (pendingDeliveryRead && ev.name === deliveryTool) {
-					pendingDeliveryRead = false;
-					if (ev.id) skipIds[ev.id] = true;
-					return;
+			// This turn's MCP ground truth (see handleChat): a clean exit with zero
+			// served calls drew nothing, however healthy the exit code looks.
+			const mcpDelta = this._mcpCounter(hub, tab.projectid);
+
+			var openSteps = {};
+			var stepCounter = 0;
+			var toolCalled = false;
+			// File-delivered prompts (Windows large-prompt path): the agent's first tool call
+			// is the read that fetches the prompt, not component data. Skip it so it neither
+			// opens a stray timeline row nor trips toolCalled and suppresses the fallback.
+			var deliveryTool = (delivery.file && delivery.file.tool) || null;
+			var skipIds = {};
+			var pendingDeliveryRead = !!deliveryTool;
+
+			// ---- liveness in the Activity log ------------------------------------------
+			// Writing a document-sized tool argument takes minutes during which the agent
+			// produces no EVENTS, only stream deltas - so the feed's last line stays whatever
+			// ran before it and the turn reads as hung. This says, every 30s, that it is alive,
+			// what it is doing, and how much has come back, which is the difference between
+			// "still writing, 34KB so far" and a genuinely stuck process.
+			var turnStart = Date.now();
+			var streamBytes = 0;
+			var lastOutputAt = Date.now();
+			var doing = 'thinking';
+			var lastStepLabel = '';
+			var ticker = setInterval(function() {
+				var secs = Math.round((Date.now() - turnStart) / 1000);
+				var quiet = Math.round((Date.now() - lastOutputAt) / 1000);
+				self.log('  … ' + doing + ' (' + (secs >= 60 ? Math.floor(secs / 60) + 'm' + (secs % 60) + 's' : secs + 's')
+					+ (streamBytes ? ', ' + Math.round(streamBytes / 1024) + 'KB received' : '')
+					+ (quiet >= 60 ? ', nothing for ' + Math.round(quiet / 60) + 'm' : '') + ')');
+				// Same liveness signal to the TAB: the tool's start step is minutes old by
+				// now, so refresh the component's loading-overlay label with the received
+				// byte count. Only once a tool is in flight or bytes stream — the initial
+				// "thinking" stretch keeps the overlay's own opening caption. Old editors
+				// route this into a no-op onStep handler, so it degrades harmlessly.
+				if (lastStepLabel || streamBytes) {
+					var tabLabel = (lastStepLabel || 'Working') + (streamBytes ? ' — ' + Math.round(streamBytes / 1024) + ' kB' : '');
+					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: 'cg_live_' + turnId, phase: 'start', tool: 'liveness', label: tabLabel } });
 				}
-				toolCalled = true;
-				// Idempotent per tool id: an agent that announces a tool before it
-				// runs (and again when the call is complete) must not open two rows.
-				if (ev.id && openSteps[ev.id]) return;
-				var stepId = 'cg_' + turnId + '_' + (stepCounter++);
-				openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
-				var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
-						.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
-				lastStepLabel = label;
-				// With partial messages this fires as the model STARTS writing the call,
-				// so from here on the wait belongs to that tool, not to "thinking".
-				doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
-				self.log('  ' + doing + '…');
-				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
-			} else if (ev.type === 'tool-end') {
-				if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; return; }
-				var open = openSteps[ev.id];
-				if (open) {
-					delete openSteps[ev.id];
-					var took = Math.round((Date.now() - open.started) / 1000);
-					self.log('  ' + (ev.ok === false ? 'failed' : 'done') + ' after ' + took + 's');
-					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
+			}, 30000);
+			if (ticker.unref) ticker.unref();
+
+			function handleEvent(ev) {
+				if (ev.type === 'model') {
+					self._noteModel(ev.id, hub);
+				} else if (ev.type === 'tool-start') {
+					if (pendingDeliveryRead && ev.name === deliveryTool) {
+						pendingDeliveryRead = false;
+						if (ev.id) skipIds[ev.id] = true;
+						return;
+					}
+					toolCalled = true;
+					// Idempotent per tool id: an agent that announces a tool before it
+					// runs (and again when the call is complete) must not open two rows.
+					if (ev.id && openSteps[ev.id]) return;
+					var stepId = 'cg_' + turnId + '_' + (stepCounter++);
+					openSteps[ev.id || stepId] = { stepId: stepId, started: Date.now() };
+					var label = String(ev.name || 'tool').replace(/^mcp__mockflow__|^mockflow[_.]/, '')
+							.replace(/^render_/, 'Generating ').replace(/_/g, ' ');
+					lastStepLabel = label;
+					// With partial messages this fires as the model STARTS writing the call,
+					// so from here on the wait belongs to that tool, not to "thinking".
+					doing = 'writing the ' + String(ev.name || 'tool').replace(/^mcp__mockflow__/, '') + ' call';
+					self.log('  ' + doing + '…');
+					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: ev.name, label: label, detail: '' } });
+				} else if (ev.type === 'tool-end') {
+					if (ev.id && skipIds[ev.id]) { delete skipIds[ev.id]; return; }
+					var open = openSteps[ev.id];
+					if (open) {
+						delete openSteps[ev.id];
+						var took = Math.round((Date.now() - open.started) / 1000);
+						self.log('  ' + (ev.ok === false ? 'failed' : 'done') + ' after ' + took + 's');
+						sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: open.stepId, phase: 'end', ok: ev.ok, elapsedMs: Date.now() - open.started } });
+					}
+					doing = 'thinking';
+					lastStepLabel = '';
 				}
-				doing = 'thinking';
-				lastStepLabel = '';
 			}
+
+			const streamStats = watchTurn(this.agent, proc, {
+				onEvent: handleEvent,
+				onModel: function(m) { self._noteModel(m, hub); },
+				// Volume, not events: while a document-sized tool argument streams in this
+				// is the only thing that moves, and it makes the heartbeat meaningful.
+				onChunk: function(len) { streamBytes += len; lastOutputAt = Date.now(); }
+			});
+
+			var finished = false;
+			function finish(ok, error, fallback) {
+				if (finished) return;
+				finished = true;
+				clearInterval(ticker);
+				// Parse-vs-reality bookkeeping, same as the chat turn: a blind parser is
+				// reported once instead of silently degrading component turns.
+				self._noteTurnHealth(streamStats, mcpDelta(), true);
+				// One closing line with what the turn actually cost, so a slow component is
+				// something you can see rather than something you have to time by hand.
+				var totalSecs = Math.round((Date.now() - turnStart) / 1000);
+				self.log('Component AI turn ' + (ok ? 'finished' : 'ended') + ' in '
+					+ (totalSecs >= 60 ? Math.floor(totalSecs / 60) + 'm' + (totalSecs % 60) + 's' : totalSecs + 's')
+					+ (streamBytes ? ' (' + Math.round(streamBytes / 1024) + 'KB from the agent)' : '')
+					+ (fallback ? ' - falling back to MockFlow AI' : '')
+					+ (error ? ': ' + error : ''));
+				self.compgenProcs.delete(key);
+				// A still-armed capture (create/modify) means the agent never produced
+				// the data - drop it and let the client fall back to the server.
+				// (A capture kept armed for a follow-up has already filled the component:
+				// the agent produced it, whether or not the follow-up came.)
+				var stillArmed = hub.hasCapture(tab.projectid)
+					&& !(typeof hub.captureFilled === 'function' && hub.captureFilled(tab.projectid));
+				hub.clearCapture(tab.projectid);
+				if (tab.projectid) hub.convertContext.delete(tab.projectid);
+				hub.selectedProjectId = prevSelected;
+				// This turn's image answer dies with the turn (see the chat path) - but
+				// this turn may be one a chat turn is waiting on, and that one's answer,
+				// surface and mode outlive it. Restoring covers both: an outer turn gets
+				// its own state back, a standalone turn is left with none.
+				hub.restoreTurnState(outerTurn);
+				if (typeof hub.clearPrePass === 'function') hub.clearPrePass(tab.projectid);
+				if (typeof hub.clearFollowUpTarget === 'function') hub.clearFollowUpTarget(tab.projectid);
+				for (var k in openSteps) {
+					sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
+				}
+				if (!isConvert && stillArmed && ok) {
+					return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'The local agent did not produce component data.' });
+				}
+				sendToTab({ t: 'compgen-done', id: turnId, ok: ok, error: error, fallback: fallback });
+			}
+
+			proc.on('error', function(err) {
+				self.log('Component AI process error: ' + err.message);
+				finish(false, 'Local agent error: ' + err.message, true);
+			});
+
+			proc.on('close', function(code) {
+				// The exit code and the parsed events are both vendor-shaped; the served
+				// MCP calls are not. A crash after the draw landed is still a drawn
+				// component, and a clean exit that never reached the bridge drew nothing.
+				const mcpServed = mcpDelta();
+				if (code !== 0 && !toolCalled && mcpServed === 0) {
+					self.log('Component AI exited ' + code + ': ' + streamStats.stderrTail);
+					finish(false, 'The local agent exited unexpectedly'
+						+ (lastErrorLine(streamStats.stderrTail) ? ' (' + lastErrorLine(streamStats.stderrTail) + ')' : '') + '.', true);
+				} else if (code === 0 && !isFill && mcpServed === 0) {
+					// Draw-new turns (convert, create-similar, prompt box) have no armed
+					// capture to say "nothing arrived", so this is their ground-truth
+					// check: a clean exit with zero calls served means nothing was drawn,
+					// and the client should fall back to MockFlow AI rather than believe
+					// a phantom success. (Fill turns are covered by stillArmed below.)
+					self.log('Component AI finished but no board call reached the bridge - falling back.');
+					finish(false, 'The local agent finished without drawing anything on the board.', true);
+				} else {
+					finish(true, null, false);
+				}
+			});
+		};
+		if (prePassEntries.length) {
+			// Sequential: each pass sees what the earlier ones captured (the drawing pass
+			// reads the plan's pieces list).
+			const self2 = this;
+			const captured = [];
+			const runNext = function(i) {
+				if (i >= prePassEntries.length) return launch(captured);
+				// A plan that lists no pieces makes the drawing pass pointless: skip it
+				// (measured: 22-110 s per pass).
+				const plan = captured.filter(function(c) { return c && c.args && Array.isArray(c.args.features); })[0];
+				if (plan && prePassEntries[i].tool === 'draw_pieces' && Array.isArray(plan.args.pieces) && !plan.args.pieces.length) {
+					self2.log('[prepass] draw_pieces skipped - the plan lists no pieces');
+					return runNext(i + 1);
+				}
+				self2._runPrePass(tab, hub, sendToTab, turnId, prePassEntries[i], prompt, captured.slice())
+					.then(function(pre) { if (pre) captured.push(pre); runNext(i + 1); }, function() { runNext(i + 1); });
+			};
+			runNext(0);
+			return;
 		}
-
-		const streamStats = watchTurn(this.agent, proc, {
-			onEvent: handleEvent,
-			onModel: function(m) { self._noteModel(m, hub); },
-			// Volume, not events: while a document-sized tool argument streams in this
-			// is the only thing that moves, and it makes the heartbeat meaningful.
-			onChunk: function(len) { streamBytes += len; lastOutputAt = Date.now(); }
-		});
-
-		var finished = false;
-		function finish(ok, error, fallback) {
-			if (finished) return;
-			finished = true;
-			clearInterval(ticker);
-			// Parse-vs-reality bookkeeping, same as the chat turn: a blind parser is
-			// reported once instead of silently degrading component turns.
-			self._noteTurnHealth(streamStats, mcpDelta(), true);
-			// One closing line with what the turn actually cost, so a slow component is
-			// something you can see rather than something you have to time by hand.
-			var totalSecs = Math.round((Date.now() - turnStart) / 1000);
-			self.log('Component AI turn ' + (ok ? 'finished' : 'ended') + ' in '
-				+ (totalSecs >= 60 ? Math.floor(totalSecs / 60) + 'm' + (totalSecs % 60) + 's' : totalSecs + 's')
-				+ (streamBytes ? ' (' + Math.round(streamBytes / 1024) + 'KB from the agent)' : '')
-				+ (fallback ? ' - falling back to MockFlow AI' : '')
-				+ (error ? ': ' + error : ''));
-			self.compgenProcs.delete(key);
-			// A still-armed capture (create/modify) means the agent never produced
-			// the data - drop it and let the client fall back to the server.
-			// (A capture kept armed for a follow-up has already filled the component:
-			// the agent produced it, whether or not the follow-up came.)
-			var stillArmed = hub.hasCapture(tab.projectid)
-				&& !(typeof hub.captureFilled === 'function' && hub.captureFilled(tab.projectid));
-			hub.clearCapture(tab.projectid);
-			if (tab.projectid) hub.convertContext.delete(tab.projectid);
-			hub.selectedProjectId = prevSelected;
-			// This turn's image answer dies with the turn (see the chat path) - but
-			// this turn may be one a chat turn is waiting on, and that one's answer,
-			// surface and mode outlive it. Restoring covers both: an outer turn gets
-			// its own state back, a standalone turn is left with none.
-			hub.restoreTurnState(outerTurn);
-			for (var k in openSteps) {
-				sendToTab({ t: 'compgen-step', id: turnId, step: { stepId: openSteps[k].stepId, phase: 'end', ok: false, elapsedMs: Date.now() - openSteps[k].started } });
-			}
-			if (!isConvert && stillArmed && ok) {
-				return sendToTab({ t: 'compgen-done', id: turnId, ok: false, fallback: true, error: 'The local agent did not produce component data.' });
-			}
-			sendToTab({ t: 'compgen-done', id: turnId, ok: ok, error: error, fallback: fallback });
-		}
-
-		proc.on('error', function(err) {
-			self.log('Component AI process error: ' + err.message);
-			finish(false, 'Local agent error: ' + err.message, true);
-		});
-
-		proc.on('close', function(code) {
-			// The exit code and the parsed events are both vendor-shaped; the served
-			// MCP calls are not. A crash after the draw landed is still a drawn
-			// component, and a clean exit that never reached the bridge drew nothing.
-			const mcpServed = mcpDelta();
-			if (code !== 0 && !toolCalled && mcpServed === 0) {
-				self.log('Component AI exited ' + code + ': ' + streamStats.stderrTail);
-				finish(false, 'The local agent exited unexpectedly'
-					+ (lastErrorLine(streamStats.stderrTail) ? ' (' + lastErrorLine(streamStats.stderrTail) + ')' : '') + '.', true);
-			} else if (code === 0 && !isFill && mcpServed === 0) {
-				// Draw-new turns (convert, create-similar, prompt box) have no armed
-				// capture to say "nothing arrived", so this is their ground-truth
-				// check: a clean exit with zero calls served means nothing was drawn,
-				// and the client should fall back to MockFlow AI rather than believe
-				// a phantom success. (Fill turns are covered by stillArmed below.)
-				self.log('Component AI finished but no board call reached the bridge - falling back.');
-				finish(false, 'The local agent finished without drawing anything on the board.', true);
-			} else {
-				finish(true, null, false);
-			}
-		});
+		launch([]);
 	}
 
 	/**
@@ -2145,10 +2181,131 @@ class AgentManager {
 		this._runPinnedTurn(tab, hub, sendToTab, {
 			tool: tool, label: label, prompt: prompt, systemPrompt: systemPrompt, argsJson: argsJson,
 			tag: 'followup', startLabel: 'Finishing…', doneText: 'Finished.',
+			onDone: function() { if (typeof hub.clearFollowUpTarget === 'function') hub.clearFollowUpTarget(tab.projectid || tab.id); },
 			logLine: 'running the follow-up for ' + tool,
 			nothingError: 'The local agent finished without applying the follow-up.',
 			stoppedError: 'The local agent stopped before finishing the component',
 			cannotError: 'so the follow-up could not be applied.'
+		});
+	}
+
+	/** The catalog's pre-passes for a tool in this fill mode (one entry or a list), in order. */
+	_prePassFor(tool, mode) {
+		const self = this;
+		const entry = this.registry ? this.registry.filter(function(e) { return e.mcpToolName === tool; })[0] : null;
+		const raw = entry && entry.clientPrePass;
+		const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+		return list.filter(function(pp) {
+			if (!pp || !pp.tool) return false;
+			if (Array.isArray(pp.modes) && pp.modes.indexOf(mode) === -1) return false;
+			const target = self.registry.filter(function(e) { return e.mcpToolName === pp.tool; })[0];
+			return !!(target && target.captureOnly);
+		}).map(function(pp) { return { tool: pp.tool, label: pp.label || 'Preparing', main: tool }; });
+	}
+
+	/** What the main turn is told about a captured plan. */
+	_planNote(pre) {
+		const a = pre.args || {};
+		const features = Array.isArray(a.features) ? a.features : [];
+		const steps = Array.isArray(a.steps) ? a.steps : [];
+		let stateText = '';
+		try { stateText = a.state ? JSON.stringify(a.state).slice(0, 1500) : ''; } catch (e) {}
+		let stepsText = '';
+		try { stepsText = JSON.stringify(steps).slice(0, 6000); } catch (e) {}
+		return ' THE PLAN IS MADE (it is sent with your render call as "spec" and "steps"; never resend or restate it): build "'
+			+ (a.title || 'the app') + '"' + (a.summary ? ' - ' + String(a.summary).slice(0, 400) : '') + '.'
+			+ (stateText ? ' Shared state: ' + stateText + '.' : '')
+			+ ' FEATURES - the FLOOR, not the ceiling: every one must work, and the app is still the polished, feature-rich, '
+			+ 'collaborative product the tool description asks for (real members with avatars, assignment pickers, presence, '
+			+ 'filters and counts, feedback moments, help) beyond this list: ' + features.join('; ') + '.'
+			+ ' ACCEPTANCE STEPS the server will EXECUTE against your booted tile before it answers, in order - the control names and '
+			+ 'input placeholders are the copy strings, so make each step pass exactly as written: ' + stepsText
+			+ ' A failing step comes back as a runtime failure with a required follow-up.';
+	}
+
+	/** What the main turn is told about the file(s) a pre-pass already wrote. */
+	_prePassNote(pre) {
+		const files = pre.args.files;
+		const names = Object.keys(files);
+		const api = Array.isArray(pre.args.api) ? pre.args.api : [];
+		const apiText = api.map(function(x) { return (x.signature || x.name || '') + (x.purpose ? ' - ' + x.purpose : ''); }).filter(Boolean).join('; ');
+		return ' PRE-DRAWN: ' + names.join(', ') + ' is already written and is added to your bundle automatically - never send, '
+			+ 'rewrite or redefine it, and do not list it in "order". It defines window.App.pieces with: '
+			+ (apiText || 'the functions in the file below') + '. Draw every piece, board, token and surface by calling these '
+			+ '(each returns an inline SVG string for your markup; size it with its container) and never draw one yourself. '
+			+ 'PLACEMENT IS YOURS, FROM THE DRAWING\'S GEOMETRY: every surface function has a <name>Layout companion '
+			+ 'returning { aspect, cells: [{ id, x, y, w, h }] } in fractions of the drawing, id being the cell\'s own identity as '
+			+ 'drawn (the printed square number, a chess coordinate, or "row,col" from the top-left) - find a cell BY ID, the square '
+			+ 'the rules name, and never recompute the surface\'s numbering, row direction or zigzag yourself; give the surface\'s container that '
+			+ 'aspect ratio (CSS aspect-ratio) and place every piece, pawn, hit area and highlight from those cell fractions - '
+			+ 'never from a guessed inset or percentage. CONTENT IS YOURS: pass your own data (the cells, the jumps table, the '
+			+ 'positions) into the surface drawing and never keep one table in the app while the drawing shows another. '
+			+ 'Every piece sits where the app\'s data puts it - the square, slot, seat or coordinate it '
+			+ 'belongs to, computed from state - sized by the cell it occupies, and it MOVES there when the state '
+			+ 'changes (an animated transition, never a jump); never place pieces at fixed decorative positions, and never '
+			+ 'expect a piece drawing to position itself (it draws one object in its own box; you place that box). '
+			+ 'LAYERING: a drawn surface (board, table, grid) is the bottom layer and the pieces sit in a layer above it, '
+			+ 'each positioned over its cell - a piece rendered inside a cell that the surface drawing covers is invisible. '
+			// The API list is what the app needs; the file itself only as a short reference —
+			// a 12 KB excerpt in the system prompt crowded out the rest of the contract.
+			+ 'The start of the file, for reference:\n' + String(files[names[0]] || '').slice(0, 2500);
+	}
+
+	/**
+	 * The drawing pass of a component fill: one pinned turn whose only tool is the
+	 * capture-only pre-pass tool. Resolves with what it captured (or null), never
+	 * rejects. Reported to the tab as one step of the same turn.
+	 */
+	_runPrePass(tab, hub, sendToTab, turnId, pp, prompt, earlier) {
+		const self = this;
+		const key = tab.projectid || tab.id;
+		const stepId = 'cg_pre_' + turnId + '_' + pp.tool;
+		const started = Date.now();
+		const send = sendToTab || function() {};
+		hub.startPrePass(key, pp.tool);
+		send({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'start', tool: pp.tool, label: pp.label, detail: '' } });
+		this.log('[prepass] ' + pp.tool + ' before ' + pp.main + ' for "' + (tab.title || key) + '"');
+		// What earlier passes captured, for this one (the drawing pass reads the plan's
+		// pieces list and features; files are never repeated).
+		let priorText = '';
+		(earlier || []).forEach(function(pre) {
+			if (!pre || !pre.args || pre.args.files) return;
+			const a = Object.assign({}, pre.args); delete a.copy;
+			try { priorText += '\n\nFROM THE ' + String(pre.tool).toUpperCase() + ' PASS (follow it exactly):\n' + JSON.stringify(a).slice(0, 6000); } catch (e) {}
+		});
+		// The exact shape, in the prompt: a short pinned turn reads the prompt, not a long
+		// tool description (catalog clientPrePassPrompt + the schema's argument names).
+		const entry = this.registry ? this.registry.filter(function(e) { return e.mcpToolName === pp.tool; })[0] : null;
+		const shapeText = (entry && entry.clientPrePassPrompt ? '\n\n' + String(entry.clientPrePassPrompt) : '') + (this._toolArgHint([pp.tool]) ? '\n' + this._toolArgHint([pp.tool]) + ' Use no other argument names.' : '');
+		const userPrompt = 'The app is being built from this request: "' + prompt + '"' + priorText + shapeText
+			+ '\n\nYour job in this turn is ONLY the ' + pp.tool + ' call: make it once, complete, in exactly that shape, then stop. If the call comes back with an error, fix the shape it names and call again.';
+		const systemPrompt = 'You are one preparatory pass for a MockFlow artifact that a later pass will build from the same request. '
+			+ 'Call the ' + pp.tool + ' tool exactly once, following its description, then stop. Do not chat, do not output any '
+			+ 'text, never output a URL. A call that comes back with an error captured nothing: read the error, fix what it '
+			+ 'names, and call the tool again (up to three tries).';
+		return this._runPinnedTurn(tab, hub, null, {
+			tool: pp.tool, label: pp.label, prompt: userPrompt, systemPrompt: systemPrompt, argsJson: '{}',
+			tag: 'prepass', startLabel: pp.label, doneText: null, silent: true, keepImageChoice: true,
+			logLine: 'preparatory pass via ' + pp.tool,
+			nothingError: 'The local agent finished without completing the ' + pp.tool + ' pass.',
+			stoppedError: 'The local agent stopped during the ' + pp.tool + ' pass',
+			cannotError: 'so the ' + pp.tool + ' pass could not run.'
+		}).then(function(r) {
+			hub.endPrePass(key);
+			let pre = hub.getPrePassFor(key, pp.tool);
+			send({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'end', ok: !!pre, elapsedMs: Date.now() - started } });
+			if (pre && pre.args && pre.args.none) {
+				// The illustrator judged this a plain UI: no drawing file, no note, nothing merged.
+				self.log('[prepass] nothing to draw for this app - the main turn builds a plain UI');
+				if (hub.prePass.get(key)) hub.prePass.get(key).delete(pp.tool);
+				pre = null;
+			} else self.log('[prepass] ' + pp.tool + ' ' + (pre ? 'captured ' + (pre.args.files ? Object.keys(pre.args.files).join(', ') : (Array.isArray(pre.args.features) ? pre.args.features.length + ' features, ' + (Array.isArray(pre.args.steps) ? pre.args.steps.length : 0) + ' steps' : 'arguments')) : 'nothing captured' + (r && r.error ? ' (' + r.error + ')' : '') + (r && !r.error ? ' (agent exited cleanly; ' + (r.served || 0) + ' call(s) reached the bridge' + (r.stderr ? '; last stderr: ' + r.stderr : '') + ')' : '')) + ' - the main turn ' + (pre ? 'uses it' : 'goes without it'));
+			return pre;
+		}, function(err) {
+			hub.endPrePass(key);
+			send({ t: 'compgen-step', id: turnId, step: { stepId: stepId, phase: 'end', ok: false, elapsedMs: Date.now() - started } });
+			self.log('[prepass] ' + pp.tool + ' failed before it could run (' + ((err && err.message) || err) + ') - the main turn goes without it');
+			return null;
 		});
 	}
 
@@ -2159,14 +2316,19 @@ class AgentManager {
 	 */
 	_runPinnedTurn(tab, hub, sendToTab, opts) {
 		const self = this;
+		// Arrow: the body below reads `this` (detect, agent, workspace).
+		return new Promise((resolve) => {
 		const key = tab.projectid || tab.id;
 		const tool = opts.tool;
-		const send = sendToTab || function() {};
+		// silent: the caller reports progress its own way (a pre-pass is one step of a
+		// component turn), so no Mida plan frames go to the tab.
+		const send = (opts.silent || !sendToTab) ? function() {} : sendToTab;
 		const tag = '[' + opts.tag + '] ';
 
 		const fail = function(reason) {
 			self.log(tag + 'turn skipped: ' + reason);
 			send({ t: 'plan-done', ok: false, error: reason });
+			resolve({ ok: false, error: reason });
 		};
 		if (!this.detect()) return fail(this.agent.label + ' is not installed, ' + opts.cannotError);
 		if (this.imageProcs.has(key)) return fail('That board is already running a follow-up turn.');
@@ -2214,10 +2376,18 @@ class AgentManager {
 		const done = function(ok, error) {
 			self.imageProcs.delete(key);
 			hub.selectedProjectId = prevSelected;
-			// This answer belonged to this piece of work, like every other turn.
-			hub.setImageChoice(tab.projectid, undefined);
+			// This answer belonged to this piece of work, like every other turn - unless
+			// the caller's own turn is still to come and owns it (a pre-pass).
+			if (!opts.keepImageChoice) hub.setImageChoice(tab.projectid, undefined);
+			// A follow-up target set during this turn dies with it, whatever the turn was
+			// (an image re-render can set one too); a later draw must never inherit it.
+			if (typeof hub.clearFollowUpTarget === 'function') hub.clearFollowUpTarget(tab.projectid || tab.id);
+			if (typeof opts.onDone === 'function') { try { opts.onDone(ok); } catch (e) {} }
 			self._noteTurnHealth(streamStats, mcpDelta(), true);
 			send({ t: 'plan-done', ok: ok, error: error || null, doneText: ok ? opts.doneText : null });
+			// The agent's last stderr line and served-call count ride back for the pre-pass
+			// log: a clean exit that captured nothing is otherwise silent evidence.
+			resolve({ ok: ok, error: error || null, stderr: lastErrorLine(streamStats.stderrTail, 200) || '', served: mcpDelta() });
 		};
 		proc.on('error', function(err) { done(false, 'Local agent error: ' + (err && err.message)); });
 		proc.on('close', function(code) {
@@ -2229,6 +2399,7 @@ class AgentManager {
 			if (code === 0) return done(true, null);
 			done(false, opts.stoppedError
 				+ (lastErrorLine(streamStats.stderrTail, 160) ? ' (' + lastErrorLine(streamStats.stderrTail, 160) + ')' : '') + '.');
+		});
 		});
 	}
 
