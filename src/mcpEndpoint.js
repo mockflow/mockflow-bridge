@@ -1295,6 +1295,12 @@ class McpEndpoint {
 		// silently malformed component: the mapping just found nothing under the
 		// documented keys and rendered whatever was left. Returning a precise
 		// error instead turns a bad render into a retry the agent can act on.
+		// Two-step tools (declared in the catalog): called without their content they
+		// answer with live reference data instead of drawing - nothing reaches the board.
+		if (typeof this.registry.directReply === 'function') {
+			const direct = await this.registry.directReply(name, args);
+			if (direct) return this._ok(direct);
+		}
 		const shapeErr = this._checkArgs(name, args);
 		if (shapeErr) return this._err(shapeErr);
 
