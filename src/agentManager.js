@@ -1071,11 +1071,18 @@ class AgentManager {
 				: (frame.__declaredHeld
 					? ' This turn draws ' + frame.__declared + ' - that is settled, and no other render tool is '
 						+ 'to be used, whatever you decided earlier in this turn. What is still yours to judge is '
-						+ 'how many: if the request covers SEVERAL screens or surfaces, call plan_board with one '
-						+ frame.__declared + ' item per screen and stop; if it is one screen, call '
+						+ 'how many: if the request covers SEVERAL screens, surfaces or floors that '
+						+ frame.__declared + ' draws one at a time, call plan_board with one '
+						+ frame.__declared + ' item per screen or floor and stop; if it is one, call '
 						+ frame.__declared + ' once.'
+					// The one-or-several question stays open here too: a tool that draws one
+					// floor, screen or scene at a time must not be called once per part -
+					// that skips the user's pick and the section the batch lands in.
 					: ' You already decided this turn draws ' + frame.__declared + ': call that tool now, and no '
-						+ 'other render tool, unless it answers with an error telling you otherwise.');
+						+ 'other render tool, unless it answers with an error telling you otherwise. The one '
+						+ 'exception is how many: if the request covers SEVERAL screens, surfaces or floors that '
+						+ frame.__declared + ' draws one at a time, call plan_board with one ' + frame.__declared
+						+ ' item each and stop, instead of drawing them one by one.');
 			if (frame.__declared !== 'plan') turnInstructions += this._toolFillContract([frame.__declared]);
 		}
 		if (declarePhase) {
