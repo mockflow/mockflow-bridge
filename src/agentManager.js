@@ -740,8 +740,7 @@ class AgentManager {
 			+ 'file of the bundle in script order (staged files included, pre-drawn files excluded), plus title, width, '
 			+ 'height and dataHint, and "assets" when pictures were agreed - it assembles everything staged and fills the '
 			+ 'component. For this tool "exactly once" means one shipping call; the part calls before it are expected. '
-			+ 'Keep the code lean: no comments, Tailwind utility classes instead of hand-written CSS wherever the injected '
-			+ 'Tailwind covers it, one responsibility per file.';
+			+ 'Keep each file to one responsibility.';
 	}
 
 	_toolFillContract(tools) {
@@ -1767,6 +1766,11 @@ class AgentManager {
 		// (observed: "wireframe for a CRM app" drew one wireframelite instead of a plan).
 		if (tools && tools.length === 1) systemPrompt += this._toolFillContract(tools);
 		if (stageTool) systemPrompt += this._stagedBundleNote(stageTool);
+		// The user's words come last, after every rule, so they are what the agent reads
+		// as the job: under ~15K tokens of contract a one-line request was getting lost.
+		if (stageTool && prompt && String(prompt).length <= 2000)
+			systemPrompt += ' THE USER\'S REQUEST, verbatim, is the spec: "' + String(prompt).trim()
+				+ '". Build exactly that, with their own names and wording, and nothing they did not ask for.';
 
 		// Real-world/current-data components: let the agent web-research first, but
 		// ALWAYS fall back to its own knowledge if search is off/unavailable/empty -
@@ -1811,6 +1815,8 @@ class AgentManager {
 			// several silent minutes are normal here and look exactly like a hang. Say so once.
 			if (stageTool)
 				this.log('  (' + stageTool + ' is written in parts - each staged part shows as a step, the last call ships)');
+			else if (tools.length === 1 && this._bundleTool(tools[0]))
+				this.log('  (' + tools[0] + ' sends only the files that change)');
 			else if (this._toolFillsFromHtml(tools) || this._toolsAreHtml(tools))
 				this.log('  (' + tools.join('/') + ' writes the whole document in one call - '
 					+ 'expect a few minutes with no visible steps)');
@@ -2254,9 +2260,7 @@ class AgentManager {
 		return ' THE PLAN IS MADE (it is sent with your render call as "spec" and "steps"; never resend or restate it): build "'
 			+ (a.title || 'the app') + '"' + (a.summary ? ' - ' + String(a.summary).slice(0, 400) : '') + '.'
 			+ (stateText ? ' Shared state: ' + stateText + '.' : '')
-			+ ' FEATURES - the FLOOR, not the ceiling: every one must work, and the app is still the polished, feature-rich, '
-			+ 'collaborative product the tool description asks for (real members with avatars, assignment pickers, presence, '
-			+ 'filters and counts, feedback moments, help) beyond this list: ' + features.join('; ') + '.'
+			+ ' FEATURES - build exactly these, each working, and nothing beyond them: ' + features.join('; ') + '.'
 			+ ' ACCEPTANCE STEPS the server will EXECUTE against your booted tile before it answers, in order - the control names and '
 			+ 'input placeholders are the copy strings, so make each step pass exactly as written: ' + stepsText
 			+ ' A failing step comes back as a runtime failure with a required follow-up.';
