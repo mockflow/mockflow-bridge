@@ -241,7 +241,8 @@ const BRIDGE_TOOLS = [
 		inputSchema: {
 			type: 'object',
 			properties: {
-				tool: { type: 'string', description: 'The render_* tool you will use (e.g. "render_moodframe"), "plan" for several different components, or "none" if this request does not draw anything.' }
+				tool: { type: 'string', description: 'The render_* tool you will use (e.g. "render_moodframe"), "plan" for several different components, or "none" if this request does not draw anything.' },
+				pictures: { type: 'boolean', description: 'true when the user asks for photos or pictures in it (a table "with their photos").' }
 			},
 			required: ['tool']
 		}
@@ -726,7 +727,10 @@ class McpEndpoint {
 							+ dLabel + '. If the request covers SEVERAL screens or surfaces, call plan_board with '
 							+ 'one ' + declared + ' item per screen instead of drawing one. ')
 						: '';
-					const needsAsk = !!(dEntry.imageSlots || dEntry.mediaComponent)
+					// A component whose pictures are the exception (imageSlotsOnRequest) is
+					// asked about only when the request wants them, never for every table.
+					const needsAsk = !!((dEntry.imageSlots && (!dEntry.imageSlotsOnRequest || args.pictures === true))
+						|| dEntry.mediaComponent)
 						&& this.hub.getImageChoice(board) === undefined;
 					if (needsAsk) {
 						// Ask NOW, before anything is composed. The drawing step starts
@@ -1389,6 +1393,10 @@ class McpEndpoint {
 		if (!kind) return null;
 
 		const before = this.hub.getImageChoice(board);
+		// Pictures are the exception here: unasked, it draws without them unless the
+		// agent actually wrote picture slots into this call.
+		if (before === undefined && kind === 'slots' && entry.imageSlotsOnRequest
+			&& JSON.stringify(args || {}).indexOf('mfimg::') === -1) return null;
 		// Already answered for this turn: act on it. When the answer was yes, the
 		// agent was told how to fill the slots (its system prompt at turn start, or
 		// the re-render turn below) and this call is its response to that.

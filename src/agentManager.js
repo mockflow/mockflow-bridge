@@ -95,6 +95,30 @@ const PERSONA =
 const FOLLOWUP_CLAUSE = ' One exception to "exactly once": when the tool\'s result contains a REQUIRED FOLLOW-UP,'
 	+ ' that one additional call is part of this turn - carry it out as stated, then stop.';
 
+/**
+ * Real subjects take real photos. Appended wherever a turn is told it may add
+ * imagery, and WebSearch/WebFetch are allowed on those turns so the agent can
+ * find them. The slot form is the tool's own; only the description changes, so
+ * every image-capable component gains it with no catalog wording of its own.
+ * Imports are free (nothing is generated), and a person without a usable photo
+ * stays empty rather than becoming a generated face.
+ */
+const WEB_IMAGES_GUIDANCE =
+	' A picture of something REAL - a named person, a real place or landmark, a real product, logo, '
+	+ 'film poster or artwork - must be the real thing, never a generated likeness: find a photo of it '
+	+ 'with WebSearch/WebFetch and, in the slot, write "web::" followed by the direct image file URL where '
+	+ 'the picture description would go (so "mfimg::web::<url>", data-ai-prompt="web::<url>" or '
+	+ 'prompt:: "web::<url>"). MockFlow imports it into the project at no cost. Take it only from a source '
+	+ 'that allows reuse: Wikimedia Commons or Wikipedia (the upload.wikimedia.org file, a 500px thumbnail '
+	+ 'where there is one), the subject\'s own official site or press kit, or free stock sites such as '
+	+ 'Unsplash and Pexels - never news sites, stock agencies or social media. Use only a URL you saw in a '
+	+ 'page you fetched, never one you composed, with any parentheses percent-encoded. For a real person '
+	+ 'write nothing after the URL, so a failed download leaves the slot empty. For anything else you may '
+	+ 'add "::" and a description after the URL, generated instead if the download fails. If no allowed '
+	+ 'photo of a real subject turns up, leave its slot out. Invented or illustrative pictures keep a '
+	+ 'plain description and are AI-generated. A tool that documents its own picture inputs instead of '
+	+ 'slots keeps its own rules.';
+
 const RESEARCH_GUIDANCE =
 	' If the request depends on real-world, current, or factual data (live statistics, '
 	+ 'prices, dates, real places, market figures), first use WebSearch/WebFetch to get '
@@ -864,7 +888,7 @@ class AgentManager {
 				+ 'has agreed to new imagery, so where the change genuinely calls for a NEW picture, add a slot '
 				+ 'in exactly the form that render tool documents, with a prompt describing it (no text, letters '
 				+ 'or numbers in it). New images are generated in the user\'s browser after your call - never '
-				+ 'output a URL or wait for one.';
+				+ 'wait for one.' + WEB_IMAGES_GUIDANCE;
 		}
 		if (choice === false && fromExisting) {
 			return ' Add NO new imagery. Every picture already in what you were given STAYS: copy each image '
@@ -878,7 +902,7 @@ class AgentManager {
 			return ' The user asked for AI-generated images in what you draw: where a render tool documents '
 				+ 'image slots, fill them in exactly the form THAT tool documents, with a prompt describing '
 				+ 'the picture (no text, letters or numbers in it). The images are generated in the user\'s '
-				+ 'browser after your call - never output a URL or wait for one.';
+				+ 'browser after your call - never wait for one.' + WEB_IMAGES_GUIDANCE;
 		}
 		if (choice === false) {
 			return ' Generate NO imagery in what you draw: leave every image slot out and carry the design '
@@ -1780,6 +1804,8 @@ class AgentManager {
 			systemPrompt += RESEARCH_GUIDANCE
 				+ ' Always finish by calling the render tool with complete data.';
 		}
+		// Images on: real subjects are found on the web (WEB_IMAGES_GUIDANCE).
+		else if (hub.getImageChoice(tab.projectid) === true) allowed += ',WebSearch,WebFetch';
 
 		// DRAWING PASS (catalog clientPrePass on the pinned tool): a short turn whose only
 		// job is the drawing file runs first; the endpoint merges its file into the main
@@ -2185,13 +2211,14 @@ class AgentManager {
 			+ ' ' + (req.slotInstruction
 				|| 'Each slot is a prompt token: put "mfimg::" followed by a plain description of the picture '
 				+ '(no text, letters or numbers in it) where the image asset belongs. The pictures are generated '
-				+ 'in the user\'s browser after your call, so never output a URL, never wait for one.')
+				+ 'in the user\'s browser after your call, so never wait for one.')
+			+ WEB_IMAGES_GUIDANCE
 			+ ' Do not chat and do not output any text. A call that comes back with an error drew nothing: read the error, '
 			+ 'fix what it names, and call the tool again (up to three tries).';
 
 		this._runPinnedTurn(tab, hub, sendToTab, {
 			tool: tool, label: label, prompt: prompt, systemPrompt: systemPrompt, argsJson: argsJson,
-			tag: 'images', startLabel: 'Adding images…', doneText: 'Images added.',
+			tag: 'images', startLabel: 'Adding images…', doneText: 'Images added.', webTools: true,
 			logLine: 're-rendering ' + tool + ' with image slots',
 			nothingError: 'The local agent finished without re-rendering the component.',
 			stoppedError: 'The local agent stopped before adding the images',
@@ -2387,7 +2414,7 @@ class AgentManager {
 			projectid: tab.projectid,
 			prompt: delivery.prompt,
 			systemPrompt: opts.systemPrompt,
-			allowedTools: 'mcp__mockflow__' + tool,
+			allowedTools: 'mcp__mockflow__' + tool + (opts.webTools ? ',WebSearch,WebFetch' : ''),
 			mockflowTools: this._mockflowToolNames(),
 			partialMessages: false
 		}, delivery));
@@ -2559,7 +2586,7 @@ class AgentManager {
 
 		const ctx = {
 			tab: tab, plan: plan, hub: hub, send: send, key: key,
-			items: items, lines: lines, imagery: imagery,
+			items: items, lines: lines, imagery: imagery, withImages: !!plan.withImages,
 			perItem: lanes > 1, procs: procs
 		};
 
@@ -2881,6 +2908,8 @@ class AgentManager {
 				+ (ctx.perItem ? ' Always finish by rendering your item.'
 					: ' Always finish by rendering every planned item.');
 		}
+		// Images on: real subjects are found on the web (WEB_IMAGES_GUIDANCE).
+		else if (ctx.withImages) allowed += ',WebSearch,WebFetch';
 
 		// partialMessages: announces each render tool the moment the model starts
 		// writing it, so the step row appears immediately instead of after thousands
