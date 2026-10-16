@@ -1135,6 +1135,15 @@ class AgentManager {
 					+ '"plan"; it is a single render tool when they asked for one artifact, or when the '
 					+ 'file really holds only one.';
 			}
+			// The tab armed its quicksetup form for this turn, and the form asks the
+			// open details itself; asking them in chat first is a second round.
+			if (frame.intake) {
+				systemPrompt += ' On this turn, naming a render tool shows the user a quick setup form for '
+					+ 'whatever the request leaves open (who it is for, names, scope, style). So when the '
+					+ 'request says what to make and what it is about, name the tool even if those are '
+					+ 'open, instead of asking them in chat. Pass "none" to ask only when you cannot tell '
+					+ 'what to make or what it is about, and never ask twice in a row.';
+			}
 			// The deciding step has no drawing tools and runs on a fresh session every
 			// time, so neither the imagery answer nor a component pin means anything to
 			// it: its own framing above is the whole instruction.
