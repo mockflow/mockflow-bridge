@@ -56,6 +56,8 @@ const INSTRUCTIONS =
 	+ 'from: read that one before you quote it, convert it or build something out of it, '
 	+ 'because the board reads shorten each component\'s text. What you could not read, say '
 	+ 'you could not read. '
+	+ 'When the user wants to organize, tidy or group what is already on the board, call '
+	+ 'arrange_board once with your groups - you can move items, and the board does the layout. '
 	+ 'When the user wants something on the board to become a DIFFERENT kind of component, '
 	+ 'that is convert_component, not a new render: it carries the real content over. '
 	+ 'When the request refers to a real website - its content, its look, or its imagery - '
@@ -166,6 +168,41 @@ const BRIDGE_TOOLS = [
 				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
 			},
 			required: ['items']
+		}
+	},
+	{
+		name: 'arrange_board',
+		description: 'Move components that are ALREADY on the board into a neat layout. Use it when the user asks to organize, tidy, arrange, group, sort, line up or clean up what is on the board (or a part of it). It never creates, edits or deletes content, except that it can draw a titled section frame around each group. First list the board with read_board (or search_board with no pattern and the default output, so every record carries its text), then decide the groups yourself from what the components ARE (games together, mind maps together, a plan with its timeline) and call this ONCE with all the groups. You only choose groups and their order; the board computes every position, so never pass coordinates. Pass top-level components: an existing section carries everything inside it and a grouped set moves as one, so do not also list a section\'s children unless you mean to pull them out of it. When tidying the whole board, include EVERY top-level component in some group (a small "Other" group is fine), otherwise the left-out ones stay where they are. Do not list connectors: they follow the items they join. Items joined by connectors (a flowchart drawn loose on the board) move as one block with their layout kept, so put a connected set in ONE group; a free line or arrow moves with the item it touches. When the user refers to what they have SELECTED ("arrange these", "tidy the selected items"), set selectionOnly: true: only selected items move and they stay where the selection is; groups are then optional. The user can undo the whole arrangement in one step. Afterwards tell the user briefly how you grouped things, never with ids.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				groups: {
+					type: 'array',
+					description: 'The groups, in the order they should appear (reading order). Within a group, list the items in the order they should appear.',
+					items: {
+						type: 'object',
+						properties: {
+							title: { type: 'string', description: 'Short label for the group, 1 to 4 words, e.g. "Games", "Research". Shown as the section title.' },
+							items: {
+								type: 'array',
+								description: 'The components in this group.',
+								items: {
+									type: 'object',
+									properties: {
+										cid: { type: 'string', description: "The component's cid, exactly as read_board or search_board returned it." },
+										name: { type: 'string', description: 'The name that SAME record shows: its label, or the start of its text (e.g. "Chess"). Used to catch a mismatched cid.' }
+									},
+									required: ['cid', 'name']
+								}
+							}
+						},
+						required: ['title', 'items']
+					}
+				},
+				selectionOnly: { type: 'boolean', description: 'Arrange only the user\'s current selection. Items outside it are ignored. Pass groups to split the selection into titled groups, or omit them to just tidy it.' },
+				wrapInSections: { type: 'boolean', description: 'Draw a titled section frame around each group. Default true. Set false when the user only wants things lined up or spaced out. A group that is already a single section is never wrapped again.' },
+				projectid: { type: 'string', description: 'Optional: a specific connected board. Defaults to the active one.' }
+			}
 		}
 	},
 	{
@@ -838,6 +875,26 @@ class McpEndpoint {
 							+ items.map(function(it) { return it.cid; }).join(', cid '));
 					}
 					return this._ok(typeof shown === 'string' ? shown : JSON.stringify(shown));
+				}
+
+				case 'arrange_board': {
+					const groups = Array.isArray(args.groups) ? args.groups.filter(Boolean) : [];
+					if (!groups.length && args.selectionOnly !== true) {
+						return this._err('arrange_board needs groups of items (cid + name) - call read_board first, '
+							+ 'or set selectionOnly when the user means the items they selected.');
+					}
+					const atarget = args.projectid || board || null;
+					const res = await this.hub.runOnBoard(atarget, {
+						t: 'arrange',
+						groups: groups,
+						selectionOnly: args.selectionOnly === true,
+						wrapInSections: args.wrapInSections !== false
+					}, config.READ_TIMEOUT_MS);
+					if (typeof this.hub.noteTurnEvent === 'function') {
+						this.hub.noteTurnEvent(atarget, 'arrange_board grouped the board into: '
+							+ groups.map(function(g) { return '"' + (g.title || '') + '"'; }).join(', '));
+					}
+					return this._ok(typeof res === 'string' ? res : JSON.stringify(res));
 				}
 
 				case 'convert_component': {
