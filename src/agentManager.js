@@ -167,6 +167,9 @@ const HISTORY_TURNS = 6;
 const HISTORY_TEXT_MAX = 400;
 const HISTORY_NOTES_MAX = 600;
 
+// An artifact tile's tools.ai call gives up here, inside the tab's own wait.
+const ARTIFACT_AI_TIMEOUT_MS = 80000;
+
 /**
  * Human label for a tool's timeline row. "lite" is an internal product suffix,
  * not something to show a user: render_wireframelite reads as "Drawing wireframe".
@@ -2803,15 +2806,45 @@ class AgentManager {
 			});
 	}
 
+	/**
+	 * tools.ai from a running Artifact tile: prompt in, text out. It touches no
+	 * board state, so it runs beside a chat or component turn on the same board.
+	 */
+	handleArtifactAi(tab, frame, sendToTab) {
+		const id = frame.id;
+		const reply = function(out) { sendToTab(Object.assign({ t: 'artifact-ai-done', id: id }, out)); };
+		const prompt = String(frame.prompt || '').slice(0, 4000);
+		if (!prompt.trim()) return reply({ ok: false, error: 'empty-prompt' });
+		if (!this.detect()) return reply({ ok: false, error: 'no-agent' });
+		const wantJson = !!frame.json;
+		const systemPrompt = 'You power a live feature inside a small collaborative mini app on a shared whiteboard '
+			+ '(an AI opponent, judge, hint-giver, character or text helper). Answer directly and concisely in the '
+			+ 'app\'s voice - no preamble, no markdown fences, no tools.'
+			+ (wantJson ? ' Respond with a single JSON object only.' : ' Plain text only.');
+		var timedOut = false, timer = null;
+		const proc = this._runTextTurn(tab, prompt, systemPrompt, function(text) {
+			clearTimeout(timer);
+			if (timedOut) return reply({ ok: false, error: 'timeout' });
+			text = String(text || '').trim();
+			if (wantJson) {
+				// Models wrap JSON in fences however they are asked not to.
+				var m = text.match(/\{[\s\S]*\}/);
+				if (m) text = m[0];
+			}
+			reply(text ? { ok: true, text: text } : { ok: false, error: 'ai-error' });
+		}, 'artifact-' + String(id || '').replace(/[^\w-]/g, ''));
+		if (proc) timer = setTimeout(function() { timedOut = true; killProcTree(proc); }, ARTIFACT_AI_TIMEOUT_MS);
+	}
+
 	/** One agent turn that only answers - no tools, no board, nothing drawn. */
-	_runTextTurn(tab, prompt, systemPrompt, done) {
+	_runTextTurn(tab, prompt, systemPrompt, done, deliveryKey) {
 		const self = this;
 		var settled = false;
 		const finish = function(text) { if (!settled) { settled = true; done(text); } };
 		var proc;
 		try {
 			const ws = this._effectiveWorkspace(tab);
-			const delivery = this._deliverPrompt(prompt, (tab.projectid || tab.id) + '-facts');
+			const delivery = this._deliverPrompt(prompt, (tab.projectid || tab.id) + '-' + (deliveryKey || 'facts'));
 			const spec = this.agent.buildArgs(this._applyDelivery({
 				cwd: ws, projectid: tab.projectid, prompt: delivery.prompt,
 				systemPrompt: systemPrompt, allowedTools: '', mockflowTools: [],
@@ -2819,8 +2852,9 @@ class AgentManager {
 			}, delivery));
 			proc = this._spawnWithPrompt(spec, delivery, { env: this._turnEnv(spec), cwd: ws });
 		} catch (err) {
-			this.log('[plan] shared-facts step could not start: ' + err.message);
-			return setImmediate(function() { finish(''); });
+			this.log('[text] text-only step could not start: ' + err.message);
+			setImmediate(function() { finish(''); });
+			return null;
 		}
 
 		var out = '';
@@ -2835,6 +2869,7 @@ class AgentManager {
 			self._noteTurnHealth(streamStats, 0, true);
 			finish(out);
 		});
+		return proc;
 	}
 
 	_runPlanTurn(ctx, indices, laneId, done) {

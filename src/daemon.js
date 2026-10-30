@@ -61,12 +61,27 @@ async function start(opts) {
 	hub.onChatCancel = function(tab) { agents.cancel(tab); };
 	// Attachments are session-scoped: they live on disk while the board tab is
 	// open (so follow-up questions about the same file work) and go when it closes.
-	hub.onTabGone = function(tab) { agents.clearAttachments(tab.projectid || tab.id); };
+	// Claude Code Session components: one long-lived Claude Code process each.
+	const CodeSessionManager = require('./codeSession');
+	const codeSessions = new CodeSessionManager({ log: log, agents: agents });
+	hub.onCodeSession = function(tab, frame, sendToTab) { codeSessions.handle(tab, frame, sendToTab); };
+	hub.onTabGone = function(tab) {
+		agents.clearAttachments(tab.projectid || tab.id);
+		codeSessions.tabGone(tab);
+	};
 	// Component QuickSettings AI (Generate / Modify / Convert) run on the same agent.
 	hub.onCompGen = function(tab, frame, sendToTab) {
 		agents.handleCompGen(tab, frame, sendToTab, hub);
 	};
 	hub.onCompGenCancel = function(tab) { agents.cancelCompGen(tab); };
+	// Artifact tiles' tools.ai calls, answered on the same agent.
+	hub.onArtifactAi = function(tab, frame, sendToTab) { agents.handleArtifactAi(tab, frame, sendToTab); };
+	// Automations set to "my local agent": runs taken from the MockFlow server
+	// once a signed-in tab has handed over its account's token.
+	const AutomationJobs = require('./automationJobs');
+	const automationJobs = new AutomationJobs({ log: log, agents: agents, hub: hub, agentLabel: picked.agent ? picked.agent.label : null });
+	hub.onAutomationAuth = function(tab, frame) { automationJobs.addAccount(frame, tab); };
+	if (agents.detect()) automationJobs.start();
 	// Whether a component turn is still running for a board - asked when a tab
 	// reconnects saying it is still waiting on one.
 	hub.isCompGenRunning = function(tab) { return agents.compgenProcs.has(tab.projectid || tab.id); };
@@ -105,7 +120,9 @@ async function start(opts) {
 		// Dev setup (catalog points at a local MockFlow, or MFBRIDGE_DEBUG=1). The
 		// tab mirrors it to turn on its own console tracing, so bridge-side and
 		// browser-side logs are on together without anyone setting a flag by hand.
-		debug: config.DEBUG
+		debug: config.DEBUG,
+		// Answers 'artifact-ai' frames (tools.ai from Artifact tiles).
+		artifactAi: true
 	};
 
 	// Secret path segment for the MCP endpoint. Local HTTP has no other
@@ -290,6 +307,7 @@ async function start(opts) {
 
 	function stopServices() {
 		agents.clearAllAttachments();
+		codeSessions.closeAll();
 		hub.stop();
 		server.close();
 		removePortFile();
@@ -360,7 +378,7 @@ async function start(opts) {
 				+ updateCheck.command(where));
 			return;
 		}
-		if (agents.isBusy()) {
+		if (agents.isBusy() || codeSessions.isBusy()) {
 			if (busyRetry) return;
 			log('Update v' + info.latest + ' available - waiting for the running turn to finish');
 			busyRetry = setTimeout(function () { busyRetry = null; autoInstall(info); }, BUSY_RETRY_MS);

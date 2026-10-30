@@ -18,6 +18,10 @@
  *                   {t:'state', focused, visible, projectid, title}
  *                   {t:'result', id, ok, data?, error?}
  *                   {t:'plan-cancel'}           stop the running plan generation
+ *                   {t:'cs', op, sid, ...}      Claude Code Session component (codeSession.js)
+ *                   {t:'automation-auth', server, email, token}  the signed-in account's
+ *                        automation token, so its runs set to the local agent come here
+ *                        (automationJobs.js)
  *   bridge -> tab:  {t:'pair-required'}
  *                   {t:'paired', token}
  *                   {t:'ready'}                 authenticated, please register
@@ -37,6 +41,7 @@
  *                   {t:'plan-step', step}       timeline row (same shape as ai-step)
  *                   {t:'plan-progress', done, total}   one planned item landed
  *                   {t:'plan-done', ok, error?} generation turn ended
+ *                   {t:'cs', op, sid, ...}      session ready / event / error (codeSession.js)
  *                   {t:'error', message}
  *
  * Security model: bind localhost only, Origin allow-list, and a one-time
@@ -424,8 +429,36 @@ class BoardHub {
 				return;
 			}
 
+			case 'artifact-ai':
+				// tools.ai from an Artifact tile. Prompt in, text out; no board state.
+				if (!tab.registered) return;
+				if (this.onArtifactAi) {
+					const self = this;
+					this.onArtifactAi(tab, msg, function(frame) { self._send(ws, frame); });
+				} else {
+					this._send(ws, { t: 'artifact-ai-done', id: msg.id, ok: false, error: 'not-supported' });
+				}
+				return;
+
 			case 'compgen-cancel':
 				if (tab.registered && this.onCompGenCancel) this.onCompGenCancel(tab);
+				return;
+
+			case 'cs':
+				// Claude Code Session component. Replies go to the board, so a
+				// reloaded tab picks the live session back up.
+				if (!tab.registered) return;
+				if (this.onCodeSession) {
+					const self = this;
+					this.onCodeSession(tab, msg, function(frame) { self._sendToBoard(tab.projectid, ws, frame); });
+				} else {
+					this._send(ws, { t: 'cs', op: 'error', sid: msg.sid, code: 'unsupported', message: 'Update the MockFlow bridge to use Claude Code Session.' });
+				}
+				return;
+
+			case 'automation-auth':
+				// The signed-in tab's automation token, so runs set to the local agent reach this bridge
+				if (tab.registered && this.onAutomationAuth) this.onAutomationAuth(tab, msg);
 				return;
 
 			case 'plan-cancel':

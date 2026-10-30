@@ -181,6 +181,28 @@ module.exports = {
 		return { args: args, env: {} };
 	},
 
+	/**
+	 * A long-lived interactive session (Claude Code Session component): prompts,
+	 * permission answers and interrupts go in on stdin as stream-json, and every
+	 * tool needing approval comes out as a can_use_tool control request.
+	 * session: { projectid, resume, extraDirs[], systemPrompt }
+	 */
+	buildSessionArgs(session) {
+		const args = [
+			'-p',
+			'--input-format', 'stream-json',
+			'--output-format', 'stream-json',
+			'--verbose',
+			'--include-partial-messages',
+			'--permission-prompt-tool', 'stdio',
+			'--mcp-config', mcpConfigPath(session.projectid)
+		];
+		if (session.systemPrompt) args.push('--append-system-prompt', session.systemPrompt);
+		(session.extraDirs || []).forEach(function(dir) { if (dir) args.push('--add-dir', dir); });
+		if (session.resume) args.push('--resume', session.resume);
+		return { args: args, env: {} };
+	},
+
 	spawn(args, opts) {
 		return spawnCli(BIN, args, opts);
 	},
