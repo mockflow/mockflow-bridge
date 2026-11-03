@@ -187,6 +187,13 @@ function installInfo() {
 	const inNpx = /[\\/]_npx[\\/]/.test(ROOT);
 	const kind = (isClone || linked) ? 'source' : (inNpx ? 'npx' : 'global');
 	const writable = kind === 'global' && canWrite(ROOT) && canWrite(path.dirname(ROOT));
+	const needsSudo = kind === 'global' && !writable;
+	// A root-owned copy under a prefix whose bin folder IS ours (the usual
+	// Homebrew/nvm-less Mac after one `sudo npm i -g`): taking the package folder
+	// back once makes every later update a plain `u`. Unix only; no sudo on Windows.
+	const binDir = path.resolve(ROOT, '..', '..', '..', '..', 'bin');
+	const ownDir = config.PKG_NAME.charAt(0) === '@' ? path.dirname(ROOT) : ROOT;
+	const fixable = needsSudo && process.platform !== 'win32' && canWrite(binDir);
 	return {
 		kind: kind,
 		dir: ROOT,
@@ -195,7 +202,9 @@ function installInfo() {
 		selfUpdate: kind === 'global' && writable,
 		// A global install this process cannot write: the user can still update it,
 		// with sudo, by hand.
-		needsSudo: kind === 'global' && !writable
+		needsSudo: needsSudo,
+		// The folder to take back with chown, when that alone would end the sudo.
+		fixDir: fixable ? ownDir : ''
 	};
 }
 
@@ -203,7 +212,22 @@ function installInfo() {
 function command(info) {
 	const i = info || installInfo();
 	if (i.kind === 'source') return 'git pull';
+	const fix = fixCommand(i);
+	if (fix) return fix + ' && npm i -g ' + config.PKG_NAME;
 	return (i.needsSudo ? 'sudo ' : '') + 'npm i -g ' + config.PKG_NAME;
+}
+
+/**
+ * One-time ownership fix for a root-owned install, or '' when it would not help.
+ * Literal user name, not $(whoami), so it pastes into any shell.
+ */
+function fixCommand(info) {
+	const i = info || installInfo();
+	if (!i.fixDir) return '';
+	var user = '';
+	try { user = require('os').userInfo().username; } catch (e) {}
+	if (!user || !/^[A-Za-z0-9._-]+$/.test(user)) return '';
+	return 'sudo chown -R ' + user + ' "' + i.fixDir + '"';
 }
 
 /**
@@ -299,4 +323,4 @@ function available() {
 	return { current: config.ENGINE_VERSION, latest: cache.latest };
 }
 
-module.exports = { notice, refresh, behind, available, installInfo, command, userCommand, install, fetchLatest };
+module.exports = { notice, refresh, behind, available, installInfo, command, fixCommand, userCommand, install, fetchLatest };

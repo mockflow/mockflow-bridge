@@ -447,7 +447,7 @@ function dash(W, H) {
 		out.push(' ' + C.cyan('⬆ Update available — v' + s.upd.current + ' → v' + s.upd.latest)
 			+ C.dim(updating ? '   installing…'
 				: s.updWhere.selfUpdate ? '   press u to install'
-				: '   run: ' + updateCheck.command(s.updWhere)));
+				: '   press u to copy: ' + updateCheck.command(s.updWhere)));
 	}
 	if (!s.paired) out.push(' ' + C.cyan('◎ Open MockFlow and enter code ') + C.amber(pcode()) + C.dim('   to connect a board'));
 	if (s.warn) out.push(' ' + C.amber('⚠ ' + s.warn));
@@ -560,8 +560,9 @@ function helpBody() {
 		if (s.updWhere.selfUpdate) {
 			lines.push('   ' + C.cyan('u') + ' install it and restart' + C.dim('  ·  or start with --auto-update'));
 		} else {
-			lines.push('   ' + C.white(updateCheck.command(s.updWhere)));
-			if (s.updWhere.needsSudo) lines.push('   ' + C.dim('this install is owned by another user, so it needs sudo'));
+			lines.push('   ' + C.white(updateCheck.command(s.updWhere)) + C.dim('  ·  u copies it'));
+			if (s.updWhere.fixDir) lines.push('   ' + C.dim('this install is owned by root; the chown gives it back once, so later updates are just u'));
+			else if (s.updWhere.needsSudo) lines.push('   ' + C.dim('this install is owned by another user, so it needs sudo'));
 		}
 	}
 	else lines.push('   ' + C.green('up to date ✓'));
@@ -643,14 +644,23 @@ function onKey(str, key) {
 			case 'm': if (s.agentOK && s.isBai) return openModel(); return;
 			case 'b': if (s.boards.length > 1) return openBoard(); return;
 			case 'y': return yankFeed();
-			case 'u': if (s.upd && s.updWhere.selfUpdate && !updating) { mode = 'update'; return render(); } return;
+			case 'u':
+				if (!s.upd || updating) return;
+				if (s.updWhere.selfUpdate) { mode = 'update'; return render(); }
+				// Cannot install over this copy: put the command on the clipboard,
+				// since the mouse capture blocks normal terminal selection.
+				return copyToClipboard(updateCheck.command(s.updWhere), 1);
 			case 'd': mode = 'details'; return render();
 			case '?': case 'h': mode = 'help'; return render();
 			case 'q': mode = 'quit'; return render();
 		}
 		return;
 	}
-	if (mode === 'help' || mode === 'details') { if (key.name === 'escape') { mode = 'dashboard'; render(); } return; }
+	if (mode === 'help' || mode === 'details') {
+		if (str === 'u' && mode === 'help') { var hs = snapshot(); if (hs.upd && !hs.updWhere.selfUpdate) copyToClipboard(updateCheck.command(hs.updWhere), 1); return; }
+		if (key.name === 'escape') { mode = 'dashboard'; render(); }
+		return;
+	}
 	if (mode === 'update') {
 		if (str === 'y' || str === 'Y') return startUpdate();
 		if (key.name === 'escape') { mode = 'dashboard'; render(); }
@@ -723,7 +733,7 @@ function notifyUpdate(info) {
 	announcedUpdate = info.latest;
 	const where = updateCheck.installInfo();
 	pushAct('⬆', 'ok', 'Update available — v' + info.current + ' → v' + info.latest + '.  '
-		+ (where.selfUpdate ? 'Press u to install it.' : updateCheck.command(where)));
+		+ (where.selfUpdate ? 'Press u to install it.' : 'Press u to copy: ' + updateCheck.command(where)));
 }
 
 /* ---------------------------------------------------------- update --- */
