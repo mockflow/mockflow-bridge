@@ -241,7 +241,11 @@
 				title: args.title || '',
 				clientid: MF_UserSession.getUser().company,
 				projectid: ec.projectObj.id,
-				cid: cid
+				cid: cid,
+				// The endpoint derives clientid from this identity, never from the fields above
+				username: MF_UserSession.getUser().username,
+				password: MF_UserSession.getUser().password,
+				company: MF_UserSession.getUser().company
 			}, function(resp) {
 				if (!resp || !resp.success) {
 					return reply(frame.id, false, 'The prototype could not be stored: ' + ((resp && resp.error) || 'storage failed'));

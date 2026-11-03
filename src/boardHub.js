@@ -728,7 +728,7 @@ class BoardHub {
 	 * otherwise draw it as a normal new component (per-board serialized).
 	 * @returns {Promise<{captured:boolean}|any>}
 	 */
-	captureOrDraw(projectid, toolName, gdata, imageSlotForm, imagesAllowed) {
+	captureOrDraw(projectid, toolName, gdata, imageSlotForm, imagesAllowed, previewOpts) {
 		var key = projectid;
 		if (!key) {
 			try { key = this._targetTab(null).tab.projectid || null; } catch (e) { key = null; }
@@ -756,9 +756,13 @@ class BoardHub {
 		if (conv && gdata && gdata.data) gdata.data.fromconvert = conv;
 		const self = this;
 		const planIndex = this._claimPlanOrder(key, toolName);
-		return this.runOnBoard(projectid, { t: 'tool', toolName: toolName, gdata: gdata,
+		const toolFrame = { t: 'tool', toolName: toolName, gdata: gdata,
 			imageSlotForm: imageSlotForm || null, imagesAllowed: !!imagesAllowed,
-			planIndex: planIndex })
+			planIndex: planIndex };
+		// a component that shows the agent what it drew, and the one a fix replaces
+		if (previewOpts && previewOpts.preview) toolFrame.preview = true;
+		if (previewOpts && previewOpts.targetCid) toolFrame.previewCid = previewOpts.targetCid;
+		return this.runOnBoard(projectid, toolFrame)
 			.then(function(res) {
 				return self._notePlannedDraw(key, planIndex).then(function(arranged) { return arranged || res; });
 			}, function(err) {

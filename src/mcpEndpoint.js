@@ -30,6 +30,18 @@ const FOLLOWUP_HINT =
 	+ ' call read_board for its id and then modify_component. Re-rendering leaves the'
 	+ ' original on the board and creates a duplicate.';
 
+// A tool whose result shows the agent what it drew (catalog agentPreview) takes
+// "fixOf": the id that result gave, so ONE corrected call replaces that component
+// instead of drawing a second one. Fixes per component are capped.
+const PREVIEW_MAX_FIXES = 2;
+function withFixOf(def) {
+	const schema = Object.assign({}, def.inputSchema || {});
+	schema.properties = Object.assign({}, schema.properties || {}, {
+		fixOf: { type: 'string', description: 'Only when correcting what you just made after looking at its preview: the id that tool result gave you. The corrected call replaces that component in place. Leave it out for anything new.' }
+	});
+	return Object.assign({}, def, { inputSchema: schema });
+}
+
 const INSTRUCTIONS =
 	'MockFlow Bridge draws visualizations LIVE onto the MockFlow board the user has '
 	+ 'open in their browser. Use the render_* tools whenever the user asks to create, '
@@ -575,6 +587,9 @@ class McpEndpoint {
 			const e = self._entry(def.name);
 			if (e && e.captureOnly) return prePassTool === def.name;
 			return true;
+		}).map(function(def) {
+			const entry = self._entry(def.name);
+			return (entry && entry.agentPreview) ? withFixOf(def) : def;
 		}).map(function(def) {
 			const entry = self._entry(def.name);
 			if (!entry || !entry.imageSlots) return def;
@@ -1231,7 +1246,8 @@ class McpEndpoint {
 	 * component's imagery; the tab honours it and empties any slot that arrives
 	 * without agreement.
 	 */
-	async _draw(board, entry, name, args, withImages) {
+	// unread: the draw that follows the picture question; its answer reaches no agent
+	async _draw(board, entry, name, args, withImages, unread) {
 		// Basic-plan daily generation cap is MEASURED here, never enforced: the
 		// bridge counts every draw a basic board makes - including component
 		// Create/Modify AI, which fills in place (a capture) but is still a
@@ -1392,19 +1408,34 @@ class McpEndpoint {
 			}
 		}
 
+		// A preview tool: the drawn component shows the agent itself, and "fixOf" names
+		// one this bridge previewed for it (anything else is ignored, so a stray id can
+		// never overwrite a component the agent did not just make)
+		let previewOpts = null;
+		if (entry.agentPreview) {
+			const fixOf = args && typeof args.fixOf === 'string' ? args.fixOf : '';
+			const known = fixOf ? this._previewed(board, fixOf, name) : null;
+			if (fixOf && !known) this.log('[preview] ' + name + ' fixOf ' + fixOf + ' is not a component previewed here - drawing new');
+			previewOpts = { preview: !unread && (!known || known.fixes < PREVIEW_MAX_FIXES), targetCid: known ? fixOf : null };
+		}
+		if (args && args.fixOf !== undefined) delete args.fixOf;
+
 		const gdata = this.registry.mapToolToGdata(name, args);
 		if (!gdata) return this._err('Tool ' + name + ' has no client rendering mapping.');
 
 		// If a component Generate/Modify turn armed a capture for this board,
 		// the gdata fills the component the user is editing instead of drawing
 		// a new one (fill-in-place). Otherwise it draws normally.
-		const res = await this.hub.captureOrDraw(board, name, gdata, entry.imageSlotForm || null, withImages);
+		const res = await this.hub.captureOrDraw(board, name, gdata, entry.imageSlotForm || null, withImages, previewOpts);
 
 		// Count the draw against the basic-plan cap - whether it drew a new
 		// component or filled one in place (capture). Both are a generation.
 		if (meter) this._recordGen(board);
 
 		const type = name.replace('render_', '');
+		if (previewOpts && res && !res.captured && !res.arranged && (res.updated || res.previewCid)) {
+			return this._previewResult(board, name, type, res, previewOpts);
+		}
 		if (res && res.captured) {
 			return this._ok('Generated the ' + type + ' and applied it to the component the user is '
 				+ 'editing. It is already updated on their screen - you are done, do not call any more tools.');
@@ -1521,7 +1552,7 @@ class McpEndpoint {
 				return;
 			}
 			this.log('[images] generating the ' + pending.label + ' the user confirmed');
-			return this._draw(board, pending.entry, pending.toolName, pending.args, true)
+			return this._draw(board, pending.entry, pending.toolName, pending.args, true, true)
 				.then(function(res) { self._followUpAfterDraw(board, pending, res, true); })
 				.catch(function() {});
 		}
@@ -1538,7 +1569,7 @@ class McpEndpoint {
 			return;
 		}
 		this.log('[images] drawing the ' + pending.label + ' the agent already produced, without images');
-		return this._draw(board, pending.entry, pending.toolName, pending.args, false)
+		return this._draw(board, pending.entry, pending.toolName, pending.args, false, true)
 			.then(function(res) { self._followUpAfterDraw(board, pending, res, false); })
 			.catch(function() {});
 	}
@@ -1650,6 +1681,52 @@ class McpEndpoint {
 			if (perItem === true || perItem === false) return perItem;
 		}
 		return this.hub.getImageChoice(board) === true;
+	}
+
+	// Components this bridge showed an agent, per board: cid -> { tool, fixes, at }.
+	// Kept an hour; a fix is only honoured for the same tool on the same board.
+	_previewed(board, cid, tool) {
+		if (!this._previews) this._previews = new Map();
+		const m = this._previews.get(board || '');
+		const p = m && m.get(String(cid));
+		if (!p || p.tool !== tool || Date.now() - p.at > 3600000) return null;
+		return p;
+	}
+
+	_notePreviewed(board, cid, tool, fixed) {
+		if (!this._previews) this._previews = new Map();
+		const key = board || '';
+		if (!this._previews.has(key)) this._previews.set(key, new Map());
+		const m = this._previews.get(key);
+		const old = m.get(String(cid));
+		const p = { tool: tool, fixes: (old ? old.fixes : 0) + (fixed ? 1 : 0), at: Date.now() };
+		m.set(String(cid), p);
+		return p;
+	}
+
+	// The draw's result with the pictures the component made of itself
+	_previewResult(board, name, type, res, opts) {
+		const cid = res.previewCid || opts.targetCid;
+		const p = cid ? this._notePreviewed(board, cid, name, !!res.updated) : null;
+		const what = res.updated ? 'Replaced the ' + type + ' in place with your corrected version.' : 'Rendered the ' + type + ' onto the board the user has open.';
+		const pv = res.preview;
+		const images = (pv && Array.isArray(pv.images)) ? pv.images.filter(function(im) { return im && im.data; }) : [];
+		if (!images.length || !p) {
+			return this._ok(what + ' It is already visible on their screen - do not output or ask the user to open a link.'
+				+ (res.updated ? ' You are done: do not call this tool again.' : FOLLOWUP_HINT));
+		}
+		const left = PREVIEW_MAX_FIXES - p.fixes;
+		const text = what + ' It is already on the user\'s screen - never output a URL or a link.\n\n'
+			+ (pv.note ? pv.note + '\n\n' : '')
+			+ 'If it is right, you are done: stop and tell the user in a sentence. '
+			+ (left > 0
+				? 'If something is wrong, call ' + name + ' ONCE more with the COMPLETE corrected content (everything, not just the change) and "fixOf": "' + cid + '": that replaces this ' + type + ' in place, nothing new is drawn. '
+					+ 'Fix only real faults you can see; do not redesign. ' + (left === 1 ? 'This is the last fix allowed.' : left + ' fixes allowed.')
+				: 'No more fixes are allowed: do not call ' + name + ' again.');
+		this.log('[preview] ' + name + ' ' + cid + ': ' + images.length + ' sheet(s) to the agent' + (res.updated ? ' (fix ' + p.fixes + ')' : ''));
+		return { content: [{ type: 'text', text: text }].concat(images.map(function(im) {
+			return { type: 'image', data: im.data, mimeType: im.mime || 'image/png' };
+		})), isError: false };
 	}
 
 	_ok(text) {
