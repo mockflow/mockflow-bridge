@@ -135,11 +135,17 @@ async function start(opts) {
 	const server = http.createServer(function(req, res) {
 		const url = (req.url || '').split('?')[0];
 
+		// DNS rebinding: a web page re-pointed at 127.0.0.1 still sends its own Host
+		if (!localHost(req)) {
+			res.writeHead(403);
+			return res.end();
+		}
+
 		if (req.method === 'OPTIONS') {
 			// Preflight is answered for the status route only. /mcp is not a browser
 			// endpoint and must not be reachable cross-origin.
 			if (url === '/' || url === '/status') {
-				cors(res);
+				cors(req, res);
 				res.writeHead(204);
 				return res.end();
 			}
@@ -148,7 +154,7 @@ async function start(opts) {
 		}
 
 		if (req.method === 'GET' && (url === '/' || url === '/status')) {
-			cors(res);
+			cors(req, res);
 			res.writeHead(200, { 'Content-Type': 'application/json' });
 			return res.end(JSON.stringify({
 				status: 'ok',
@@ -606,11 +612,20 @@ function startUpdateWatch(updateCheck, onUpdate) {
 	return timer;
 }
 
-function cors(res) {
-	res.setHeader('Access-Control-Allow-Origin', '*');
+// /status lists open boards and the workspace path, so only MockFlow pages may read it
+function cors(req, res) {
+	res.setHeader('Vary', 'Origin');
+	const origin = req.headers.origin;
+	if (!origin || config.ALLOWED_ORIGINS.indexOf(origin) === -1) return;
+	res.setHeader('Access-Control-Allow-Origin', origin);
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 	res.setHeader('Access-Control-Allow-Headers',
 		'Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version');
+}
+
+function localHost(req) {
+	const host = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
+	return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
 }
 
 /**
@@ -664,7 +679,7 @@ function loadOrCreateMcpToken() {
 }
 
 function sendRpc(res, id, result, error) {
-	cors(res);
+	// No CORS: /mcp is for local agent processes, never browsers
 	res.writeHead(200, { 'Content-Type': 'application/json' });
 	const msg = { jsonrpc: '2.0', id: id == null ? null : id };
 	if (error) msg.error = error; else msg.result = result;
